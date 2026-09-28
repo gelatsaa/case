@@ -2,13 +2,13 @@
 
 A personal productivity and organizing web app: dashboard, to-do, calendar, notes, folders, moodboards, timer, ambience, themes, and settings.
 
-## Current status: Phase 3 baseline (September 2026)
+## Current status: Phase 4, Batch 1 (Supabase accounts + roles)
 
 - Single-file vanilla HTML/CSS/JavaScript app (`index.html`). No framework, no build step.
-- **Sign-in is preview-only.** It is not real authentication. Passwords are never checked or stored.
-- **No backend is connected.** When CASE! runs on its own (for example on Vercel), data is saved only in the visitor's browser (localStorage).
-- The Admin area is a development-only preview. Its access check runs in the browser and is **not** security.
-- Planned next: Supabase (real authentication, database, file storage, server-side admin roles).
+- **Sign-in:** preview-only until the Supabase Project URL and publishable key are added to `AUTH_CONFIG` in `index.html`. With them, CASE! uses real Supabase Auth (email + password, confirmation and reset emails).
+- **Admin roles:** in Supabase mode, roles come from the `profiles` table and are protected by Row Level Security. The development test list only works in preview mode.
+- **Data:** still saved in the browser only (kept separate per account in Supabase mode). Cloud sync is the next step (Batch 2).
+- `supabase/schema.sql` is the database setup, run once in the Supabase SQL Editor. It contains no keys.
 
 ## Running it
 

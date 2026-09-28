@@ -1979,7 +1979,10 @@ function doodleSVG(seed) {
 }
 
 /* ================= state & persistence ================= */
-const LS = 'case:v1:';
+/* Browser-storage prefix for app data. Preview mode: 'case:v1:' (unchanged).
+   Supabase mode: 'case:u:<account id>:' while signed in, null while signed out, so two accounts
+   on one browser never see each other's data. The old 'case:v1:' data is left untouched. */
+let LS = 'case:v1:';
 const NOTE_COLORS = ['#fff1a8', '#ffd3cc', '#d4e4ff', '#d5f0c9', '#e4d9ff'];
 const DEFTIM = { break: 5, meditate: 10, focus: 25 };
 const DEF = {
@@ -2000,12 +2003,24 @@ const DEF = {
 const S = {}, T = {}, have = {}, dirty = {}, writing = {}, timers = {}, chain = {}, recent = {};
 const meta = { mode: 'boot', db: null, uid: null, assets: null, me: null, booted: false, synced: false };
 function get(k) { if (S[k] === undefined) S[k] = DEF[k] ? DEF[k]() : (k.startsWith('board_') ? { items: [] } : null); return S[k]; }
-function lsGet(k) { try { const v = localStorage.getItem(LS + k); return v ? JSON.parse(v) : undefined; } catch (e) { return undefined; } }
-function lsSet(k, v, t) { try { localStorage.setItem(LS + k, JSON.stringify({ v, t })); if (meta.lsFail) { meta.lsFail = null; paintStatus(); } } catch (e) { meta.lsFail = (e && e.name === 'QuotaExceededError') ? 'full' : 'blocked'; paintStatus(); } }
-function lsDel(k) { try { localStorage.removeItem(LS + k); } catch (e) { } }
-function lsKeys() { try { return Object.keys(localStorage).filter(k => k.startsWith(LS)).map(k => k.slice(LS.length)); } catch (e) { return []; } }
+function lsGet(k) { if (!LS) return undefined; try { const v = localStorage.getItem(LS + k); return v ? JSON.parse(v) : undefined; } catch (e) { return undefined; } }
+function lsSet(k, v, t) { if (!LS) return; try { localStorage.setItem(LS + k, JSON.stringify({ v, t })); if (meta.lsFail) { meta.lsFail = null; paintStatus(); } } catch (e) { meta.lsFail = (e && e.name === 'QuotaExceededError') ? 'full' : 'blocked'; paintStatus(); } }
+function lsDel(k) { if (!LS) return; try { localStorage.removeItem(LS + k); } catch (e) { } }
+function lsKeys() { if (!LS) return []; try { return Object.keys(localStorage).filter(k => k.startsWith(LS)).map(k => k.slice(LS.length)); } catch (e) { return []; } }
 function loadLocal() { lsKeys().forEach(k => { if (k === '__uid') return; const w = lsGet(k); if (w && 'v' in w) { S[k] = w.v; T[k] = w.t || 0; have[k] = true; } }); }
 const docPath = k => 'data/users/' + meta.uid + '/' + k;
+/* Supabase mode only: point the app's data at the signed-in account (or at nothing when signed
+   out). Batch 1: each account's data is still kept in THIS browser only (no cloud sync yet). */
+function useAccountData(sess) {
+  const id = sess && sess.user && sess.user.id ? String(sess.user.id) : null;
+  const prefix = id ? 'case:u:' + id + ':' : null;
+  if (meta.acctReady && prefix === LS) return;
+  meta.acctReady = true;
+  [S, T, have, dirty].forEach(o => Object.keys(o).forEach(k => delete o[k]));
+  LS = prefix;
+  if (prefix) { loadLocal(); if (!have.profile) seed(); }
+  if (meta.booted) { applyTheme(); tmSet(TM.mode); refreshNotifs(); paintNotifBadge(); paintStreak(); }
+}
 
 function save(k) {
   T[k] = Date.now(); have[k] = true; lsSet(k, S[k], T[k]);
@@ -2509,7 +2524,9 @@ function profileSection() {
   const name = h('input', { class: 'field', value: p.name || '', maxlength: 40, placeholder: 'Your name' });
   const username = h('input', { class: 'field', value: p.username || '', maxlength: 30, placeholder: 'e.g. ari.k' });
   const bio = h('textarea', { class: 'field', rows: 3, maxlength: 240, placeholder: 'A short line about you' }, p.bio || '');
-  const emailRow = (meta.me && meta.me.email) ? h('p', { class: 'psmall' }, 'Signed in as ', h('b', {}, meta.me.email), ' via your Claude account.') : h('p', { class: 'psmall' }, 'Email is managed by your Claude account.');
+  const emailRow = (meta.me && meta.me.email) ? h('p', { class: 'psmall' }, 'Signed in as ', h('b', {}, meta.me.email), ' via your Claude account.')
+    : (Auth.session && Auth.session.user.email) ? h('p', { class: 'psmall' }, 'Signed in as ', h('b', {}, Auth.session.user.email), Auth.isPreview() ? ' (preview sign-in).' : '.')
+    : h('p', { class: 'psmall' }, 'Email is managed by your Claude account.');
   const pick = (accept, fn) => { const i = h('input', { type: 'file', accept, hidden: true }); appendKids(document.body, i); i.addEventListener('change', async () => { const f = i.files[0]; i.remove(); if (f) { try { await fn(f); } catch (e) { toast('That image could not be used. Try a PNG or JPG.', 'err'); } } }); i.click(); };
   const avatar = h('button', { class: 'avatar lg', type: 'button', 'aria-label': 'Change profile photo', onclick: () => changeProfilePhoto(refresh) }, h('img', { src: avatarSrc(), alt: '' }));
   const save1 = () => { p.name = name.value.trim(); p.username = username.value.trim().replace(/\s+/g, ''); p.bio = bio.value.trim(); save('profile'); toast('Profile saved.'); paintSide(); };
@@ -3088,12 +3105,22 @@ function musicSection() {
 function privacySection() {
   return h('div', { class: 'set-stack' },
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Sign-in & security'),
-      h('p', { class: 'psmall' }, 'CASE! doesn\u2019t have its own password — signing in is handled by your Claude account, so password changes and active-session management happen there, not here.')),
+      securityCopy()),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Data management'),
-      h('p', { class: 'psmall' }, 'Your CASE! data (tasks, notes, folders, moodboards, settings) is private to your account and synced across your devices.'),
+      h('p', { class: 'psmall' }, meta.mode === 'db' ? 'Your CASE! data (tasks, notes, folders, moodboards, settings) is private to your account and synced across your devices.'
+        : 'Your CASE! data (tasks, notes, folders, moodboards, settings) is saved in this browser only. It isn\u2019t synced across devices yet.'),
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data as JSON'),
         h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Clear all CASE! data'))));
+}
+/* Sign-in & security text, honest for each mode */
+function securityCopy() {
+  if (meta.mode === 'db') return h('p', { class: 'psmall' }, 'CASE! doesn\u2019t have its own password — signing in is handled by your Claude account, so password changes and active-session management happen there, not here.');
+  if (Auth.isPreview()) return h('p', { class: 'psmall' }, 'This is a preview sign-in: CASE! doesn\u2019t check or store a password yet. Real accounts and password changes arrive with Supabase.');
+  const email = Auth.session && Auth.session.user.email;
+  return [h('p', { class: 'psmall' }, 'You sign in to CASE! with your email and password. To change your password, we\u2019ll email you a secure link.'),
+    h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', disabled: !email, onclick: async () => {
+      const r = await Auth.resetPassword(email); toast(r.error ? r.error.message : 'Reset link sent to ' + email + '. Open it in this browser.', r.error ? 'err' : undefined); } }, 'Email me a reset link'))];
 }
 function accountSection() {
   const p = get('profile');
@@ -3101,7 +3128,7 @@ function accountSection() {
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Account'),
       h('div', { class: 'kv' }, h('span', {}, 'Name'), h('span', {}, p.name || '—')),
       h('div', { class: 'kv' }, h('span', {}, 'Username'), h('span', {}, p.username || '—')),
-      h('div', { class: 'kv' }, h('span', {}, 'Email'), h('span', {}, (meta.me && meta.me.email) || 'Managed by your Claude account')),
+      h('div', { class: 'kv' }, h('span', {}, 'Email'), h('span', {}, (meta.me && meta.me.email) || (meta.mode === 'db' ? 'Managed by your Claude account' : (Auth.session && Auth.session.user.email) || '—'))),
       h('div', { class: 'kv' }, h('span', {}, 'Sync'), h('span', {}, meta.mode === 'db' ? 'Synced across devices' : 'Saved on this device only'))),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Sign-in'),
       h('div', { class: 'kv' }, h('span', {}, 'Status'), h('span', {}, Auth.isPreview() ? 'Preview session (no real account)' : 'Signed in')),
@@ -3109,7 +3136,8 @@ function accountSection() {
       Auth.isPreview() ? h('p', { class: 'psmall', style: { margin: '10px 0 12px' } }, 'Real accounts aren’t connected yet. Signing out returns you to the welcome page but doesn’t lock your data: anyone using this browser can sign in again and see it.') : null,
       h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', onclick: signOutFlow }, ic('logout', 16), 'Sign out'))),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Export & delete'),
-      h('p', { class: 'psmall' }, 'Deleting your Claude account itself is done from claude.ai account settings, not here. This clears only what CASE! has stored.'),
+      h('p', { class: 'psmall' }, meta.mode === 'db' ? 'Deleting your Claude account itself is done from claude.ai account settings, not here. This clears only what CASE! has stored.'
+        : Auth.isPreview() ? 'This clears only what CASE! has stored in this browser.' : 'Deleting your CASE! account itself isn\u2019t available in the app yet. This clears only what CASE! has stored in this browser for your account.'),
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data'),
         h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Delete all CASE! data'))));
@@ -3940,13 +3968,24 @@ let mbDragging = false;
      signInWithOAuth({provider})  -> supabase.auth.signInWithOAuth({ provider, options:{ redirectTo } })
    (Not implemented or tested here: there is no Supabase project connected.) */
 const AUTH_CONFIG = {
-  mode: 'preview',                          // 'preview' now; 'supabase' once a real project exists
-  supabase: { url: '', anonKey: '' },       // public URL + anon key only. NEVER a service-role key.
+  mode: 'preview',                          // switches to 'supabase' automatically (below) once url + key are filled in
+  /* Supabase Project URL + PUBLISHABLE key (starts with sb_publishable_) or the legacy ANON key.
+     Both are public by design: Row Level Security on the server protects the data.
+     NEVER put a secret key (sb_secret_…), a service_role key, or the database password here. */
+  supabase: { url: 'https://xpdnjhwhvtkzroejzgrt.supabase.co', anonKey: 'sb_publishable_0DXZu7FMWTSLrM02v17AjQ_qmeOhEZ2' },
   providers: [                              // OAuth providers: shown, but disabled until configured
     { id: 'google', label: 'Google', enabled: false },
     { id: 'apple', label: 'Apple', enabled: false }
   ]
 };
+(function pickAuthMode() {
+  const url = String(AUTH_CONFIG.supabase.url || '').trim(), key = String(AUTH_CONFIG.supabase.anonKey || '').trim();
+  if (!url || !key) return;
+  AUTH_CONFIG.mode = 'supabase';
+  let role = null;
+  try { const part = key.split('.')[1]; if (part) role = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))).role; } catch (e) { }
+  if (/^sb_secret_/i.test(key) || role === 'service_role') AUTH_CONFIG.unsafeKey = true;   // refuse to use it
+})();
 /* Stored OUTSIDE the 'case:v1:' prefix on purpose: loadLocal() treats every 'case:v1:' key as
    app data (synced + exported), and a session must never end up in there. */
 const AUTH_KEY = 'case:auth:v1', AUTH_NEXT = 'case:auth:next';
@@ -3963,27 +4002,107 @@ const PreviewAuth = {
   async signInWithPassword({ email }) { const s = this._make(email); this._write(s); return { data: { session: s, user: s.user }, error: null }; },
   async resetPasswordForEmail() { return { data: null, error: { code: 'preview', message: 'Password reset emails need Supabase, which isn’t connected yet. No email was sent.' } }; },
   async signInWithOAuth({ provider }) { return { data: null, error: { code: 'not_configured', message: `${provider} sign-in isn’t connected yet.` } }; },
-  async signOut() { this._write(null); return { error: null }; }
+  async signOut() { this._write(null); return { error: null }; },
+  async updatePassword() { return { data: null, error: { code: 'preview', message: 'Password changes need real accounts, which aren’t connected in this preview.' } }; }
+};
+
+/* ---- Real sign-in through Supabase Auth (used only when AUTH_CONFIG.mode === 'supabase') ----
+   Loaded on demand, so preview mode never downloads it. Uses the PKCE flow: email links come
+   back as ?code=… (not #access_token=…), which keeps them away from CASE!'s #/ page router. */
+const SUPABASE_JS = ['https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js',
+  'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2'];          // fallback: latest 2.x
+const SB_STORAGE_KEY = 'case:sb:auth';                                // Supabase's own session key (not app data)
+const SB_OFFLINE = 'CASE! couldn’t reach its sign-in service. Check your internet connection and try again.';
+function loadScriptOnce(src) {
+  return new Promise((res, rej) => { const el = document.createElement('script'); el.src = src; el.async = true; el.crossOrigin = 'anonymous';
+    el.onload = res; el.onerror = () => { el.remove(); rej(new Error('script')); }; document.head.appendChild(el); });
+}
+function authRedirect(kind) { return location.origin + location.pathname + '?case=' + kind; }
+function friendlyAuthError(e) {
+  const m = String((e && (e.message || e.error_description)) || '');
+  if (/invalid login credentials/i.test(m)) return 'That email and password don’t match. Try again, or reset your password.';
+  if (/email not confirmed/i.test(m)) return 'Please confirm your email first. Open the link we sent you, then sign in.';
+  if (/already registered|already been registered/i.test(m)) return 'An account with this email already exists. Try signing in instead.';
+  if (/rate limit|too many|security purposes/i.test(m)) return 'Too many attempts. Please wait a minute and try again.';
+  if (/failed to fetch|network|load failed/i.test(m)) return SB_OFFLINE;
+  if (/same password|different from the old/i.test(m)) return 'Choose a password that’s different from your old one.';
+  if (/password/i.test(m) && /least|short|weak|characters/i.test(m)) return 'Choose a stronger password with at least 8 characters.';
+  return m || 'Something went wrong. Please try again.';
+}
+const SupabaseAuth = {
+  kind: 'supabase', isReal: true, client: null, loadError: null, _loading: null,
+  load() { return this._loading || (this._loading = this._load()); },
+  async _load() {
+    if (AUTH_CONFIG.unsafeKey) { this.loadError = 'Sign-in is switched off: this page was set up with a SECRET key, which must never be used in a web page. Replace it with the publishable (anon) key.'; console.error('[CASE!] Refusing to use a secret/service_role Supabase key in the browser.'); return null; }
+    const url = String(AUTH_CONFIG.supabase.url).trim().replace(/\/+$/, ''), key = String(AUTH_CONFIG.supabase.anonKey).trim();
+    if (!/^https:\/\/[^\s/]+$/i.test(url)) { this.loadError = 'Sign-in isn’t set up correctly (the Supabase URL looks wrong).'; return null; }
+    for (const src of SUPABASE_JS) {
+      if (window.supabase && window.supabase.createClient) break;
+      try { await loadScriptOnce(src); } catch (e) { }
+    }
+    if (!(window.supabase && window.supabase.createClient)) { this.loadError = 'CASE! couldn’t load its sign-in service. Check your internet connection and refresh the page.'; return null; }
+    try {
+      this.client = window.supabase.createClient(url, key, { auth: { flowType: 'pkce', detectSessionInUrl: true, persistSession: true, autoRefreshToken: true, storageKey: SB_STORAGE_KEY } });
+    } catch (e) { this.loadError = 'CASE! couldn’t start its sign-in service.'; this.client = null; }
+    return this.client;
+  },
+  _off() { return { data: { session: null, user: null }, error: { code: 'unavailable', message: this.loadError || SB_OFFLINE } }; },
+  _err(e) { return { code: (e && (e.code || e.status)) || 'error', message: friendlyAuthError(e) }; },
+  async _run(fn) {
+    if (!await this.load()) return this._off();
+    try { const { data, error } = await fn(this.client.auth); return { data: data || {}, error: error ? this._err(error) : null }; }
+    catch (e) { return { data: {}, error: this._err(e) }; }
+  },
+  async getSession() { const r = await this._run(a => a.getSession()); return { data: { session: (r.data && r.data.session) || null }, error: r.error }; },
+  onAuthStateChange(cb) { if (this.client) this.client.auth.onAuthStateChange((event, session) => cb(event, session)); },
+  signUp({ email, password }) { return this._run(a => a.signUp({ email, password, options: { emailRedirectTo: authRedirect('confirmed') } })); },
+  signInWithPassword({ email, password }) { return this._run(a => a.signInWithPassword({ email, password })); },
+  resetPasswordForEmail(email) { return this._run(a => a.resetPasswordForEmail(email, { redirectTo: authRedirect('recovery') })); },
+  updatePassword(password) { return this._run(a => a.updateUser({ password })); },
+  async signInWithOAuth({ provider }) {
+    const p = AUTH_CONFIG.providers.find(x => x.id === provider);
+    if (!p || !p.enabled) return { data: null, error: { code: 'not_configured', message: `${p ? p.label : provider} sign-in isn’t connected yet.` } };
+    return this._run(a => a.signInWithOAuth({ provider, options: { redirectTo: authRedirect('oauth') } }));
+  },
+  async signOut() {
+    if (!this.client) return { error: null };
+    const r = await this._run(a => a.signOut());
+    if (r.error) { try { await this.client.auth.signOut({ scope: 'local' }); } catch (e) { } }   // always forget the session on this device
+    return { error: null };
+  }
 };
 
 const Auth = {
-  adapter: PreviewAuth, session: null, ready: false, listeners: [],
+  adapter: AUTH_CONFIG.mode === 'supabase' ? SupabaseAuth : PreviewAuth, session: null, ready: false, listeners: [], recovery: false,
   async init() {
     try { const { data } = await this.adapter.getSession(); this.session = data.session; } catch (e) { this.session = null; }
     this.ready = true;
+    /* Supabase: sign-in/out in another tab, token refreshes, and password-recovery links */
+    if (this.adapter.onAuthStateChange) this.adapter.onAuthStateChange((event, sess) => {
+      if (event === 'PASSWORD_RECOVERY') this.recovery = true;
+      this._set(sess || null);
+      if (event === 'PASSWORD_RECOVERY' && meta.booted) go('reset-password');
+    });
     /* keep tabs in sync: signing out in one tab signs out the others */
-    window.addEventListener('storage', e => { if (e.key === AUTH_KEY) { this.session = this.adapter._read ? this.adapter._read() : null; this._emit(); } });
+    window.addEventListener('storage', e => { if (e.key === AUTH_KEY && this.adapter._read) { this.session = this.adapter._read(); this._emit(); } });
   },
+  /* only announce a change when the signed-in person actually changes (not on token refresh) */
+  _who(s) { return s && s.user ? String(s.user.id || s.user.email || '') : ''; },
+  _set(sess) { const changed = this._who(sess) !== this._who(this.session); this.session = sess; if (changed) this._emit(); },
   isSignedIn() { return !!this.session; },
   isPreview() { return !this.adapter.isReal; },
   onChange(fn) { this.listeners.push(fn); },
   _emit() { this.listeners.forEach(fn => { try { fn(this.session); } catch (e) { } }); },
-  async signUp(email, password) { const r = await this.adapter.signUp({ email, password }); if (!r.error) { this.session = r.data.session; this._emit(); } return r; },
-  async signIn(email, password) { const r = await this.adapter.signInWithPassword({ email, password }); if (!r.error) { this.session = r.data.session; this._emit(); } return r; },
+  async signUp(email, password) { const r = await this.adapter.signUp({ email, password }); if (!r.error && r.data && r.data.session) this._set(r.data.session); return r; },
+  async signIn(email, password) { const r = await this.adapter.signInWithPassword({ email, password }); if (!r.error && r.data && r.data.session) this._set(r.data.session); return r; },
+  async updatePassword(password) { const r = await this.adapter.updatePassword(password); if (!r.error) this.recovery = false; return r; },
   async resetPassword(email) { return this.adapter.resetPasswordForEmail(email); },
   async signInWithProvider(provider) { return this.adapter.signInWithOAuth({ provider }); },
-  async signOut() { const r = await this.adapter.signOut(); this.session = null; this._emit(); return r; }
+  async signOut() { const r = await this.adapter.signOut(); this.recovery = false; this._set(null); return r; }
 };
+/* Supabase mode: switch the app's data to the account that just signed in (or clear it on sign
+   out). Registered first, so data is in place before the role check and the re-render below. */
+Auth.onChange(sess => { if (Auth.adapter.isReal && meta.acctReady) useAccountData(sess); });
 /* ================= access control (roles & permissions) =================
    ONE place decides what a signed-in person may do. The router and the sidebar only ever
    ask Access.can('admin.view'); nothing else in CASE! looks at emails or roles directly.
@@ -4020,14 +4139,31 @@ const DevRoleProvider = {
     return devOn && DEV_ACCESS.adminEmails.map(e => e.toLowerCase()).includes(email) ? 'admin' : 'user';
   }
 };
+/* Real roles: read from the server's `profiles` table. Row Level Security there means a person
+   can only read their own row, and nobody can change their own role from the app. */
+const SupabaseRoleProvider = {
+  kind: 'supabase', isReal: true,
+  async roleFor(session) {
+    if (!session || !session.user) return null;
+    const c = SupabaseAuth.client; if (!c) return 'user';
+    try {
+      const { data, error } = await c.from('profiles').select('role').eq('id', session.user.id).maybeSingle();
+      return !error && data && data.role === 'admin' ? 'admin' : 'user';
+    } catch (e) { return 'user'; }
+  }
+};
 const Access = {
-  provider: DevRoleProvider, role: null,
+  provider: AUTH_CONFIG.mode === 'supabase' ? SupabaseRoleProvider : DevRoleProvider, role: null, _tok: 0,
+  /* returns a Promise that settles once the role is known (boot waits for it) */
   refresh() {
+    const tok = ++this._tok;
     let r; try { r = this.provider.roleFor(Auth.session); } catch (e) { r = null; }
     if (r && typeof r.then === 'function') {            // a real provider will be async
       this.role = Auth.session ? 'user' : null;           // least privilege while it loads
-      r.then(v => { this.role = v || null; if (meta.booted) render(); }, () => { this.role = Auth.session ? 'user' : null; });
-    } else this.role = r || null;
+      return r.then(v => { if (tok !== this._tok) return; const was = this.role; this.role = v || null; if (meta.booted && was !== this.role) render(); },
+        () => { if (tok === this._tok) this.role = Auth.session ? 'user' : null; });
+    }
+    this.role = r || null; return Promise.resolve();
   },
   can(perm) { return !!this.role && (ROLE_PERMISSIONS[this.role] || []).includes(perm); },
   isDevGrant() { return this.role === 'admin' && !this.provider.isReal; }
@@ -4054,14 +4190,14 @@ function stampHistory() { try { if (!(history.state && history.state[HIST_STAMP]
 function cameViaHistory() { try { return !!(history.state && history.state[HIST_STAMP]); } catch (e) { return false; } }
 
 async function signOutFlow() {
-  const ok = await new Promise(res => openModal({ title: 'Sign out of CASE!?', content: h('p', { class: 'mtext' }, 'You’ll return to the welcome page. In this preview, your CASE! data stays saved in this browser and reappears when you sign in again.'),
+  const ok = await new Promise(res => openModal({ title: 'Sign out of CASE!?', content: h('p', { class: 'mtext' }, Auth.isPreview() ? 'You’ll return to the welcome page. In this preview, your CASE! data stays saved in this browser and reappears when you sign in again.' : 'You’ll return to the welcome page. Your CASE! data stays saved in this browser for your account and reappears when you sign in again.'),
     actions: [{ label: 'Cancel', value: false }, { label: 'Sign out', kind: 'primary', value: true }], onClose: v => res(v === true) }));
   if (!ok) return;
   await Auth.signOut(); toast('Signed out.');
 }
 
 /* ================= public views ================= */
-const PUBLIC_PAGES = new Set(['welcome', 'signin', 'signup', 'forgot']);
+const PUBLIC_PAGES = new Set(['welcome', 'signin', 'signup', 'forgot', 'reset']);
 
 function pubHeader() {
   const signed = Auth.isSignedIn();
@@ -4078,7 +4214,7 @@ function popStar(cls, fill = '#ffe38f') {
 }
 function pubFooter() {
   return h('footer', { class: 'pub-wrap pub-foot' },
-    h('div', {}, h('span', { class: 'brand-mark' }, 'CASE!', popStar(null, '#ffb3a7')), h('div', {}, 'Preview build. Accounts aren’t connected yet, so what you create is saved in this browser.')),
+    h('div', {}, h('span', { class: 'brand-mark' }, 'CASE!', popStar(null, '#ffb3a7')), h('div', {}, Auth.isPreview() ? 'Preview build. Accounts aren’t connected yet, so what you create is saved in this browser.' : 'Accounts are live. For now, what you create is saved in the browser you use.')),
     h('nav', { 'aria-label': 'Account' }, h('a', { href: '#/signin' }, 'Sign in'), h('a', { href: '#/signup' }, 'Create account')));
 }
 function peekPreview() {
@@ -4311,7 +4447,11 @@ function viewWelcome() {
 }
 
 /* shared pieces for the three auth screens */
-function previewNote(text) { return h('p', { class: 'auth-note', role: 'note' }, h('strong', {}, 'Preview mode. '), text); }
+function previewNote(text) {
+  if (Auth.isPreview()) return h('p', { class: 'auth-note', role: 'note' }, h('strong', {}, 'Preview mode. '), text);
+  /* real accounts: no preview warning; only speak up if the sign-in service couldn't start */
+  return SupabaseAuth.loadError ? h('p', { class: 'auth-note', role: 'alert' }, h('strong', {}, 'Sign-in unavailable. '), SupabaseAuth.loadError) : null;
+}
 function providerButtons() {
   return [h('div', { class: 'auth-or' }, 'or'),
     h('div', { class: 'auth-prov' }, ...AUTH_CONFIG.providers.map(p => h('button', { class: 'btn wide', type: 'button', disabled: !p.enabled, 'data-provider': p.id,
@@ -4323,10 +4463,12 @@ const AUTH_SIDES = {
     perks: ['Pick up your to-do list where you left off', 'Your notes, folders, and boards in one place', 'Timer and ambience, ready when you are'] },
   signup: { h: 'Make a space that’s all yours.', p: 'Set up CASE! in a minute, then fill it with your plans, notes, and ideas.',
     perks: ['To-do lists that show up on your calendar', 'Rich-text notes, folders, and moodboards', 'A focus timer, ambience, and seven themes'] },
-  forgot: { h: 'It happens to everyone.', p: 'Once accounts are connected, a reset link will arrive by email.', perks: [] }
+  forgot: { h: 'It happens to everyone.', p: 'Once accounts are connected, a reset link will arrive by email.', perks: [] },
+  reset: { h: 'A fresh start.', p: 'Pick a new password and you’re back in.', perks: [] }
 };
+const AUTH_SIDES_REAL = { forgot: { p: 'We’ll email you a secure link to choose a new password.' } };
 function authShell(title, sub, body, kind = 'signin') {
-  const side = AUTH_SIDES[kind] || AUTH_SIDES.signin;
+  const side = { ...(AUTH_SIDES[kind] || AUTH_SIDES.signin), ...(!Auth.isPreview() && AUTH_SIDES_REAL[kind] || {}) };
   const art = h('div', { class: 'auth-art' }); art.innerHTML = doodleSVG(20260925);
   const notes = svgFrom(`<svg class="notes-svg" viewBox="0 0 170 104" aria-hidden="true" focusable="false"><g stroke="#1b1b22" stroke-width="2" stroke-linejoin="round">
     <rect x="8" y="30" width="62" height="62" rx="6" fill="#ffb3a7" transform="rotate(-7 39 61)"/><rect x="56" y="18" width="62" height="62" rx="6" fill="#bfe1f2" transform="rotate(4 87 49)"/>
@@ -4362,7 +4504,7 @@ function viewSignIn() {
     if (!pi.value) { err.textContent = 'Enter your password.'; pi.focus(); return; }
     const r = await Auth.signIn(em, pi.value); pi.value = '';
     if (r.error) { err.textContent = r.error.message; return; }
-    toast('Signed in (preview).'); finishSignIn();
+    toast(Auth.isPreview() ? 'Signed in (preview).' : 'Signed in.'); finishSignIn();
   };
   const form = h('form', { class: 'auth-form', novalidate: true, onsubmit: onSubmit },
     email, pw,
@@ -4390,7 +4532,12 @@ function viewSignUp() {
     if (a.value !== b.value) { err.textContent = 'The two passwords don’t match.'; b.focus(); return; }
     const r = await Auth.signUp(em, a.value); a.value = ''; b.value = '';
     if (r.error) { err.textContent = r.error.message; return; }
-    toast('Preview session started. No account was created.'); finishSignIn(true);
+    if (!Auth.isPreview() && !(r.data && r.data.session)) {   // Supabase: email confirmation required
+      form.replaceWith(h('div', { class: 'auth-done', role: 'status' }, 'Check your email. We sent a confirmation link to ', h('strong', {}, em),
+        '. Open it in this same browser to finish creating your account.'));
+      return;
+    }
+    toast(Auth.isPreview() ? 'Preview session started. No account was created.' : 'Account created. Welcome to CASE!'); finishSignIn(true);
   };
   const form = h('form', { class: 'auth-form', novalidate: true, onsubmit: onSubmit },
     email, pw, h('p', { class: 'psmall', id: 'pw-hint', style: { marginTop: '-6px' } }, 'At least 8 characters.'), pw2,
@@ -4425,6 +4572,52 @@ function viewForgot() {
     previewNote('Password reset emails aren’t connected yet. This screen is ready for when they are.'),
     box, h('p', { class: 'auth-alt', style: { marginTop: '18px' } }, h('a', { href: '#/signin' }, 'Back to sign in'))], 'forgot');
 }
+
+/* Where a password-reset email link lands (#/reset-password). Built from the same pieces as the
+   other auth screens. Needs the short-lived session that the reset link signs you in with. */
+function viewReset() {
+  if (!Auth.isSignedIn()) return authShell('This link has expired', 'Password reset links work once, for a short time, in the browser where you asked for them.', [
+    previewNote('Password changes need real accounts, which aren’t connected in this preview.'),
+    h('a', { class: 'btn primary wide lg pop', href: '#/forgot-password' }, 'Send a new reset link'),
+    h('p', { class: 'auth-alt', style: { marginTop: '18px' } }, h('a', { href: '#/signin' }, 'Back to sign in'))], 'reset');
+  const err = h('p', { class: 'auth-err', role: 'alert' });
+  const pw = authField('New password', { type: 'password', name: 'new-password', autocomplete: 'new-password', required: true, minlength: '8', 'aria-describedby': 'pw-hint' });
+  const pw2 = authField('Confirm new password', { type: 'password', name: 'confirm-password', autocomplete: 'new-password', required: true });
+  const onSubmit = async e => {
+    e.preventDefault(); err.textContent = '';
+    const a = $('input', pw), b = $('input', pw2);
+    if (a.value.length < 8) { err.textContent = 'Use at least 8 characters for your password.'; a.focus(); return; }
+    if (a.value !== b.value) { err.textContent = 'The two passwords don’t match.'; b.focus(); return; }
+    const r = await Auth.updatePassword(a.value); a.value = ''; b.value = '';
+    if (r.error) { err.textContent = r.error.message; return; }
+    toast('Password updated.'); finishSignIn(true);
+  };
+  const form = h('form', { class: 'auth-form', novalidate: true, onsubmit: onSubmit },
+    pw, h('p', { class: 'psmall', id: 'pw-hint', style: { marginTop: '-6px' } }, 'At least 8 characters.'), pw2,
+    err, h('button', { class: 'btn primary wide lg pop', type: 'submit', onclick: onSubmit }, 'Save new password'));
+  return authShell('Choose a new password', 'Signed in as ' + (Auth.session.user.email || 'your account') + '.', [
+    previewNote('Password changes need real accounts, which aren’t connected in this preview.'), form], 'reset');
+}
+
+/* Supabase email links return to  /?case=confirmed|recovery|oauth&code=…  (or with ?error=…).
+   supabase-js swaps the code for a session during Auth.init(); afterwards this tidies the URL
+   back to a normal #/ route and says what happened. */
+function readAuthCallback() {
+  const q = new URLSearchParams(location.search), hq = new URLSearchParams(location.hash.startsWith('#/') ? '' : location.hash.slice(1));
+  const kind = q.get('case'), error = q.get('error') || hq.get('error'), code = q.get('error_code') || hq.get('error_code');
+  if (!kind && !error && !q.has('code')) return null;
+  return { kind, error, code };
+}
+function finishAuthCallback(cb) {
+  if (!cb) return;
+  let to = '#/', msg = null;
+  if (cb.error) { to = cb.kind === 'recovery' ? '#/forgot-password' : '#/signin'; msg = cb.code === 'otp_expired' ? 'That link has expired or was already used. Please request a new one.' : 'That link didn’t work. Please try again.'; }
+  else if (cb.kind === 'recovery') { if (Auth.isSignedIn()) { Auth.recovery = true; to = '#/reset-password'; } else { to = '#/forgot-password'; msg = 'That reset link didn’t work in this browser. Request a new one here.'; } }
+  else if (cb.kind === 'confirmed') { if (Auth.isSignedIn()) msg = 'Email confirmed. Welcome to CASE!'; else { to = '#/signin'; msg = 'Your email is confirmed. Sign in to continue.'; } }
+  else if (!Auth.isSignedIn()) to = '#/signin';
+  try { history.replaceState(null, '', location.pathname + to); } catch (e) { location.hash = to; }
+  if (msg) setTimeout(() => toast(msg), 300);
+}
 </script>
 <script>
 /* ================= router ================= */
@@ -4443,7 +4636,7 @@ document.addEventListener('click', e => {
 }, true);
 
 const ROUTES = { '': 'home', todo: 'todo', calendar: 'calendar', notes: 'notes', folders: 'folders', moodboard: 'moodboard', settings: 'settings', admin: 'admin',
-  /* public area (see auth section) */ welcome: 'welcome', signin: 'signin', signup: 'signup', 'forgot-password': 'forgot' };
+  /* public area (see auth section) */ welcome: 'welcome', signin: 'signin', signup: 'signup', 'forgot-password': 'forgot', 'reset-password': 'reset' };
 const route = { page: 'home', arg: null };
 function parseHash() { const raw = location.hash.replace(/^#\/?/, ''); const [p, ...rest] = raw.split('/'); const page = ROUTES[p] !== undefined ? p : ''; return { page: ROUTES[page], arg: rest.length ? decodeURIComponent(rest.join('/')) : null }; }
 function go(path) { location.hash = '#/' + path; }
@@ -4466,7 +4659,7 @@ function render() {
   const main = $('#view');
   let node;
   try {
-    node = r.page === 'welcome' ? viewWelcome() : r.page === 'signin' ? viewSignIn() : r.page === 'signup' ? viewSignUp() : r.page === 'forgot' ? viewForgot() :
+    node = r.page === 'welcome' ? viewWelcome() : r.page === 'signin' ? viewSignIn() : r.page === 'signup' ? viewSignUp() : r.page === 'forgot' ? viewForgot() : r.page === 'reset' ? viewReset() :
       r.page === 'home' ? viewHome() : r.page === 'todo' ? viewTodo() : r.page === 'calendar' ? viewCalendar(r.arg) : r.page === 'notes' ? viewNotes(r.arg) : r.page === 'folders' ? viewFolders(r.arg) : r.page === 'settings' ? viewSettings(r.arg) : r.page === 'admin' ? viewAdmin(r.arg) : viewBoard(r.arg);
   } catch (e) {
     console.error(e); if (typeof noteAppError === 'function') noteAppError(e, 'Page: ' + r.page); node = h('div', { class: 'page narrow' }, h('div', { class: 'empty' }, h('h2', {}, 'Something went wrong on this page'), h('p', {}, 'Try going back to Home.'), h('a', { class: 'btn primary', href: '#/' }, 'Go home')));
@@ -4492,12 +4685,21 @@ async function finishBoot() {
 }
 function remoteChanged() { if (meta.booted) { applyTheme(); paintSide(); render(); } }
 async function boot() {
-  loadLocal();
+  const real = AUTH_CONFIG.mode === 'supabase';
+  if (real) LS = null; else loadLocal();       // Supabase: no data until we know who is signed in
   applyTheme();
+  const cb = real ? readAuthCallback() : null;
   await Auth.init();
-  Access.refresh();
+  if (real) useAccountData(Auth.session);
+  const roleKnown = Access.refresh();
+  if (real) await Promise.race([roleKnown, new Promise(r => setTimeout(r, 5000))]);
   window.addEventListener('beforeunload', flushAll);
   document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
+  if (real) {                                  // Batch 1: real sign-in; data stays in this browser, per account
+    meta.mode = 'local'; meta.assets = null;
+    finishAuthCallback(cb);
+    finishBoot(); paintStatus(); return;
+  }
   let db = null, user = null, assets = null;
   try { db = await claude.use('db'); } catch (e) { }
   try { user = await claude.use('user'); } catch (e) { }
@@ -4582,9 +4784,9 @@ function admEnvRows() {
   const kv = (k, v) => h('div', { class: 'kv' }, h('span', {}, k), h('span', {}, v));
   const supa = !!(AUTH_CONFIG.supabase.url && AUTH_CONFIG.supabase.anonKey);
   return [
-    kv('Sign-in', Auth.isPreview() ? admBadge('warn', 'Preview only, no real accounts') : admBadge('ok', 'Connected')),
+    kv('Sign-in', Auth.isPreview() ? admBadge('warn', 'Preview only, no real accounts') : SupabaseAuth.client ? admBadge('ok', 'Supabase Auth') : admBadge('warn', 'Supabase not reachable')),
     kv('Data storage', meta.mode === 'db' ? admBadge('ok', 'Claude artifact storage, private per person') : meta.lsFail ? admBadge('warn', 'Not saving: browser storage blocked or full') : admBadge('warn', 'This browser only')),
-    kv('Backend (Supabase)', supa ? admBadge('warn', 'Keys added, not in use yet') : notConnected()),
+    kv('Backend (Supabase)', AUTH_CONFIG.mode === 'supabase' ? admBadge('warn', 'Sign-in and roles only; data not synced yet') : supa ? admBadge('warn', 'Keys added, not in use yet') : notConnected()),
     kv('Admin access', Access.provider.isReal ? admBadge('ok', 'Checked by the server') : admBadge('warn', 'Development test list, not secure'))
   ];
 }
@@ -4625,9 +4827,9 @@ function admUsers() {
         h('thead', {}, h('tr', {}, ['Account', 'Role', 'Status', 'Signed in', 'Actions'].map(t => h('th', { scope: 'col' }, t)))),
         h('tbody', {}, s ? h('tr', {},
           h('td', {}, h('b', {}, s.user.email), h('small', {}, 'This browser’s session')),
-          h('td', {}, Access.role === 'admin' ? 'Admin (test)' : 'User'),
-          h('td', {}, admBadge('warn', 'Preview')),
-          h('td', {}, s.created ? new Date(s.created).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—'),
+          h('td', {}, Access.role === 'admin' ? (Access.provider.isReal ? 'Admin' : 'Admin (test)') : 'User'),
+          h('td', {}, Auth.isPreview() ? admBadge('warn', 'Preview') : admBadge('ok', 'Signed in')),
+          h('td', {}, (s.created || s.user.created_at) ? new Date(s.created || s.user.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—'),
           h('td', {}, h('div', { class: 'adm-acts' }, act('Role', 'user'), act('Suspend', 'eye'), act('Delete', 'trash', true)))) : null)))),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'What this needs to work'),
       h('ol', { class: 'adm-steps' },
