@@ -2004,32 +2004,226 @@ const S = {}, T = {}, have = {}, dirty = {}, writing = {}, timers = {}, chain = 
 const meta = { mode: 'boot', db: null, uid: null, assets: null, me: null, booted: false, synced: false };
 function get(k) { if (S[k] === undefined) S[k] = DEF[k] ? DEF[k]() : (k.startsWith('board_') ? { items: [] } : null); return S[k]; }
 function lsGet(k) { if (!LS) return undefined; try { const v = localStorage.getItem(LS + k); return v ? JSON.parse(v) : undefined; } catch (e) { return undefined; } }
-function lsSet(k, v, t) { if (!LS) return; try { localStorage.setItem(LS + k, JSON.stringify({ v, t })); if (meta.lsFail) { meta.lsFail = null; paintStatus(); } } catch (e) { meta.lsFail = (e && e.name === 'QuotaExceededError') ? 'full' : 'blocked'; paintStatus(); } }
+function lsSet(k, v, t, s) { if (!LS) return; try { localStorage.setItem(LS + k, JSON.stringify(s === undefined ? { v, t } : { v, t, s })); if (meta.lsFail) { meta.lsFail = null; paintStatus(); } } catch (e) { meta.lsFail = (e && e.name === 'QuotaExceededError') ? 'full' : 'blocked'; paintStatus(); } }
 function lsDel(k) { if (!LS) return; try { localStorage.removeItem(LS + k); } catch (e) { } }
 function lsKeys() { if (!LS) return []; try { return Object.keys(localStorage).filter(k => k.startsWith(LS)).map(k => k.slice(LS.length)); } catch (e) { return []; } }
-function loadLocal() { lsKeys().forEach(k => { if (k === '__uid') return; const w = lsGet(k); if (w && 'v' in w) { S[k] = w.v; T[k] = w.t || 0; have[k] = true; } }); }
+function loadLocal() { lsKeys().forEach(k => { if (k.startsWith('__')) return; const w = lsGet(k); if (w && 'v' in w) { S[k] = w.v; T[k] = w.t || 0; have[k] = true; if (w.s) base[k] = w.s; } }); }
 const docPath = k => 'data/users/' + meta.uid + '/' + k;
-/* Supabase mode only: point the app's data at the signed-in account (or at nothing when signed
-   out). Batch 1: each account's data is still kept in THIS browser only (no cloud sync yet). */
+/* ================= Supabase cloud sync (Batch 2) =================
+   The cloud (table user_data, one row per store key) is the main copy. This browser keeps an
+   offline copy per account ('case:u:<id>:'), so CASE! opens instantly and works offline.
+   Rules: newest save wins per key; a failed download is NEVER treated as "empty"; sample data
+   is only created once Supabase has confirmed the account has no rows AND this browser has
+   no copy; every request is tagged with the account "generation" so a slow answer for one
+   account can never land in another account's data. */
+const base = {};                     // key -> newest cloud time we know of for it
+const Cloud = { state: 'connecting', fails: 0, retryTimer: null, pulling: null, lastPull: 0, clockWarned: false };
+const CLOUD_BATCH = 50;
+function cloudOn() { return meta.mode === 'cloud' && !!meta.uid && typeof SupabaseAuth !== 'undefined' && !!SupabaseAuth.client; }
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+function clearObj(o) { Object.keys(o).forEach(k => delete o[k]); }
+
+/* Point the app's data at the signed-in account (or at nothing when signed out). */
 function useAccountData(sess) {
   const id = sess && sess.user && sess.user.id ? String(sess.user.id) : null;
   const prefix = id ? 'case:u:' + id + ':' : null;
   if (meta.acctReady && prefix === LS) return;
   meta.acctReady = true;
-  [S, T, have, dirty].forEach(o => Object.keys(o).forEach(k => delete o[k]));
-  LS = prefix;
-  if (prefix) { loadLocal(); if (!have.profile) seed(); }
-  if (meta.booted) { applyTheme(); tmSet(TM.mode); refreshNotifs(); paintNotifBadge(); paintStreak(); }
+  meta.gen = (meta.gen || 0) + 1;                     // invalidates anything still in flight
+  Object.keys(timers).forEach(k => clearTimeout(timers[k])); clearTimeout(Cloud.retryTimer);
+  [S, T, have, dirty, writing, timers, chain, recent, base].forEach(clearObj);
+  Cloud.state = 'connecting'; Cloud.fails = 0; Cloud.pulling = null; Cloud.lastPull = 0;
+  LS = prefix; meta.uid = id; meta.synced = false; meta.loadFailed = false;
+  meta.mode = id ? 'cloud' : 'local';
+  if (prefix) loadLocal();                            // this account's offline copy (never seeded here)
+  if (meta.booted) {
+    if (id) cloudSync(true);                          // start the download first: a display hiccup below must never block syncing
+    try { applyTheme(); tmSet(TM.mode); refreshNotifs(); paintNotifBadge(); paintStreak(); paintStatus(); } catch (e) { console.error('[CASE!] repaint after account switch', e); }
+  }
+}
+
+/* deletes waiting for the cloud (kept in the browser copy so they survive a refresh) */
+function delList() { const w = lsGet('__del'); return w && Array.isArray(w.v) ? w.v : []; }
+function delSet(a) { if (!a.length) lsDel('__del'); else lsSet('__del', a, Date.now()); }
+
+function cloudErrKind(e) {
+  const sb = (e && e.sb) || {}, m = String(sb.message || (e && e.message) || ''), code = String(sb.code || ''), st = e && e.status;
+  if (/CASE_CLOCK/.test(m)) return 'clock';
+  if (/user_data_size/.test(m + ' ' + (sb.details || ''))) return 'size';
+  if (st === 401 || /^PGRST30/.test(code) || /JWT/i.test(m)) return 'auth';
+  if (!st || st >= 500 || st === 408 || st === 429 || /Failed to fetch|NetworkError|network|timeout|Load failed/i.test(m)) return 'net';
+  return 'other';
+}
+function cloudOk(fromDownload) {
+  /* an upload working doesn't mean downloads do: until the first download succeeds, keep its retry going */
+  if (!fromDownload && !meta.synced) return;
+  Cloud.fails = 0; clearTimeout(Cloud.retryTimer); Cloud.retryTimer = null;
+  if (Cloud.state !== 'ok') { Cloud.state = 'ok'; paintStatus(); }
+}
+function cloudFail(e, kind) {
+  kind = kind || cloudErrKind(e);
+  if (kind === 'net' || kind === 'auth') {
+    Cloud.state = 'offline'; Cloud.fails++;
+    if (kind === 'auth') SupabaseAuth.client.auth.refreshSession().catch(() => { });
+    clearTimeout(Cloud.retryTimer);
+    Cloud.retryTimer = setTimeout(cloudRetry, Math.min(60000, 2500 * Math.pow(2, Cloud.fails - 1)));
+  } else Cloud.state = 'error';
+  if (!meta.synced && !have.profile && !meta.loadFailed) { meta.loadFailed = true; if (meta.booted) render(); }
+  paintStatus();
+}
+function cloudRetry() {
+  if (!cloudOn()) return;
+  if (!meta.synced) { cloudSync(true); return; }
+  flushAll(); processDeletes(); cloudSync(false);
+}
+function markDirty(k) {
+  if (S[k] === undefined || S[k] === null) return;
+  dirty[k] = true; clearTimeout(timers[k]); timers[k] = setTimeout(() => flush(k), 700);
+}
+
+/* Download: compare the cloud's list of keys + times with this browser's copy.
+   Cloud newer -> take it. This browser newer (or never uploaded) -> upload it.
+   Returns true only when Supabase actually answered. */
+function cloudSync(first) {
+  if (!cloudOn()) return Promise.resolve(false);
+  if (Cloud.pulling) return Cloud.pulling;
+  const gen = meta.gen, c = SupabaseAuth.client, wasBlocked = !meta.synced && !have.profile;
+  const run = (async () => {
+    try {
+      const r1 = await c.from('user_data').select('key,t');
+      if (gen !== meta.gen) return false;
+      if (r1.error) throw Object.assign(new Error(r1.error.message), { sb: r1.error, status: r1.status });
+      const remote = new Map((r1.data || []).map(r => [r.key, Number(r.t) || 0]));
+      const dels = new Set(delList()), changed = new Set();
+      /* Brand-new account: Supabase CONFIRMED zero rows, and this browser has no copy either. */
+      if (!meta.synced && remote.size === 0 && !Object.keys(have).length) {
+        meta.synced = true; Cloud.lastPull = Date.now(); cloudOk(true);
+        seed();                                         // saves -> uploads
+        if (meta.booted) remoteChanged();
+        return true;
+      }
+      const toFetch = [];
+      remote.forEach((rt, k) => {
+        if (dels.has(k)) return;                        // deleted here; the delete is on its way
+        if (dirty[k] || writing[k]) { base[k] = Math.max(base[k] || 0, rt); return; }
+        const lt = have[k] ? (T[k] || 0) : -1;
+        if (rt > lt) toFetch.push(k);
+        else { base[k] = Math.max(base[k] || 0, rt); if (rt < lt) markDirty(k); }
+      });
+      Object.keys(have).forEach(k => {
+        if (remote.has(k) || dirty[k] || writing[k]) return;
+        if (base[k] && (T[k] || 0) <= base[k]) {        // was in the cloud, unchanged here -> deleted on another device
+          delete S[k]; delete have[k]; delete T[k]; delete base[k]; lsDel(k); changed.add(k);
+        } else markDirty(k);                            // never uploaded (e.g. Batch 1 data, or made offline) -> upload
+      });
+      for (let i = 0; i < toFetch.length; i += CLOUD_BATCH) {
+        const r2 = await c.from('user_data').select('key,value,t').in('key', toFetch.slice(i, i + CLOUD_BATCH));
+        if (gen !== meta.gen) return false;
+        if (r2.error) throw Object.assign(new Error(r2.error.message), { sb: r2.error, status: r2.status });
+        (r2.data || []).forEach(r => {
+          const k = r.key, rt = Number(r.t) || 0;
+          if (dirty[k] || writing[k] || (have[k] && (T[k] || 0) >= rt)) return;
+          S[k] = r.value; T[k] = rt; base[k] = rt; have[k] = true; lsSet(k, r.value, rt, rt); changed.add(k);
+        });
+      }
+      meta.synced = true; Cloud.lastPull = Date.now(); cloudOk(true);
+      processDeletes();
+      if (meta.booted && (changed.size || wasBlocked)) remoteChanged();
+      return true;
+    } catch (e) {
+      if (gen !== meta.gen) return false;
+      cloudFail(e); return false;
+    } finally { if (gen === meta.gen) Cloud.pulling = null; }
+  })();
+  Cloud.pulling = run;
+  return run;
+}
+
+/* Upload one key through put_user_data (the server only accepts it if it's newer). */
+async function cloudPut(k) {
+  if (!dirty[k] || !cloudOn()) return;
+  const v = S[k], t = T[k], gen = meta.gen;
+  if (v === undefined || v === null) { dirty[k] = false; return; }
+  dirty[k] = false; writing[k] = true; paintStatus();
+  try {
+    const { data, error, status } = await SupabaseAuth.client.rpc('put_user_data', { p_key: k, p_value: v, p_t: t });
+    if (gen !== meta.gen) return;
+    if (error) throw Object.assign(new Error(error.message), { sb: error, status });
+    const row = Array.isArray(data) ? data[0] : data, ct = Number(row && row.t) || 0;
+    recent[k] = Date.now(); cloudOk();
+    if ((row && row.applied) || ct === t) { base[k] = Math.max(base[k] || 0, t); if (T[k] === t && have[k]) lsSet(k, S[k], T[k], base[k]); }
+    else { base[k] = Math.max(base[k] || 0, ct); if (!dirty[k]) cloudSync(false); }   // the cloud has a newer version: take it
+  } catch (e) {
+    if (gen !== meta.gen) return;
+    const kind = cloudErrKind(e);
+    if (kind === 'net' || kind === 'auth') { dirty[k] = true; cloudFail(e, kind); }
+    else if (kind === 'size') { Cloud.state = 'error'; toast('One of your lists is too large to sync. Remove a few items.', 'err'); }
+    else if (kind === 'clock') { dirty[k] = true; Cloud.state = 'error'; if (!Cloud.clockWarned) { Cloud.clockWarned = true; toast('This device’s date and time look wrong, so CASE! can’t sync. Fix the clock, then refresh.', 'err'); } }
+    else { Cloud.state = 'error'; console.error('[CASE!] sync', e); toast('Could not sync the last change. It is still saved on this device.', 'err'); }
+  } finally { if (gen === meta.gen) { writing[k] = false; paintStatus(); } }
+}
+
+/* Deletes run in the same per-key queue as uploads, so they can't overtake a newer save. */
+function processDeletes() {
+  if (!cloudOn()) return;
+  delList().forEach(k => {
+    chain[k] = (chain[k] || Promise.resolve()).then(async () => {
+      if (!cloudOn() || !delList().includes(k)) return;
+      const gen = meta.gen;
+      try {
+        const { error, status } = await SupabaseAuth.client.from('user_data').delete().eq('user_id', meta.uid).eq('key', k);
+        if (gen !== meta.gen) return;
+        if (error) throw Object.assign(new Error(error.message), { sb: error, status });
+        delSet(delList().filter(x => x !== k)); cloudOk();
+      } catch (e) { if (gen === meta.gen) cloudFail(e); }
+    });
+  });
+}
+
+/* Before signing out: try (briefly) to send anything unsent. What doesn't make it stays in
+   this account's browser copy and is uploaded the next time this account signs in. */
+async function cloudDrain(ms) {
+  if (!cloudOn()) return;
+  flushAll(); processDeletes();
+  await Promise.race([Promise.allSettled(Object.values(chain)), sleepMs(ms)]);
+}
+function cloudTick() { if (cloudOn() && meta.synced && !document.hidden && Date.now() - Cloud.lastPull > 5000) cloudSync(false); }
+function cloudListeners() {
+  if (meta.cloudListening) return; meta.cloudListening = true;
+  setInterval(cloudTick, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) cloudTick(); });
+  window.addEventListener('focus', cloudTick);
+  window.addEventListener('online', () => { if (cloudOn()) { Cloud.fails = 0; cloudRetry(); } });
+  window.addEventListener('offline', () => { if (cloudOn()) { Cloud.state = 'offline'; paintStatus(); } });
+}
+/* Shown instead of a page only when this account has NO copy on this device and the cloud
+   hasn't answered yet (new device). Blank lists are never shown, so they can't be saved. */
+function cloudBlockedView() {
+  if (meta.mode !== 'cloud' || meta.synced || have.profile) return null;
+  const failed = meta.loadFailed;
+  return h('div', { class: 'page narrow' }, h('div', { class: 'empty', role: failed ? 'alert' : 'status' },
+    h('h2', {}, failed ? 'Couldn’t load your data' : 'Loading your CASE! data…'),
+    h('p', {}, failed ? 'CASE! couldn’t reach your account, so nothing was changed. Check your internet connection, then try again.' : 'Getting everything from your account.'),
+    failed ? h('button', { class: 'btn primary', type: 'button', onclick: e => {
+      const b = e.currentTarget; b.disabled = true; b.textContent = 'Retrying…';
+      Cloud.fails = 0; cloudSync(true).then(ok => { if (!ok && b.isConnected) { b.disabled = false; b.textContent = 'Retry'; toast('Still can’t reach CASE!. Check your connection.', 'err'); } });
+    } }, 'Retry') : null));
 }
 
 function save(k) {
-  T[k] = Date.now(); have[k] = true; lsSet(k, S[k], T[k]);
+  const cloud = meta.mode === 'cloud';
+  /* cloud mode, before the first successful download: a key this browser never had must not be
+     saved (it would be a blank default, and saving it could overwrite the real cloud copy) */
+  if ((cloud && !meta.synced && !have[k]) || (AUTH_CONFIG.mode === 'supabase' && !LS)) { document.dispatchEvent(new CustomEvent('case:saved', { detail: k })); return; }   // (no account signed in: nothing to save)
+  T[k] = cloud ? Math.max(Date.now(), (base[k] || 0) + 1) : Date.now(); have[k] = true; lsSet(k, S[k], T[k], cloud ? base[k] : undefined);
+  if (cloud) { const d = delList(); if (d.includes(k)) delSet(d.filter(x => x !== k)); }
   document.dispatchEvent(new CustomEvent('case:saved', { detail: k }));   // lets live widgets (e.g. Progress) refresh
-  if (meta.mode !== 'db') { paintStatus(); return; }
+  if (meta.mode !== 'db' && !cloud) { paintStatus(); return; }
   dirty[k] = true; clearTimeout(timers[k]); timers[k] = setTimeout(() => flush(k), 700); paintStatus();
 }
 function flush(k) {
   chain[k] = (chain[k] || Promise.resolve()).then(async () => {
+    if (meta.mode === 'cloud') return cloudPut(k);
     if (!dirty[k] || meta.mode !== 'db') return;
     dirty[k] = false; writing[k] = true; paintStatus();
     try { await meta.db.doc(docPath(k)).set({ v: S[k], t: T[k] }); recent[k] = Date.now(); }
@@ -2046,11 +2240,19 @@ function flushAll() { Object.keys(dirty).forEach(k => { if (dirty[k]) { clearTim
 function removeKey(k) {
   delete S[k]; delete have[k]; delete dirty[k]; lsDel(k);
   if (meta.mode === 'db') meta.db.doc(docPath(k)).delete().catch(() => { });
+  if (meta.mode === 'cloud') { clearTimeout(timers[k]); delete base[k]; const d = delList(); if (!d.includes(k)) delSet(d.concat(k)); processDeletes(); }
 }
 function paintStatus() {
   const el = $('#sync'); if (!el) return;
   let t = 'Connecting…', c = 'wait';
   if (meta.mode === 'db') { const busy = Object.keys(dirty).some(k => dirty[k]) || Object.keys(writing).some(k => writing[k]); t = busy ? 'Saving…' : 'Synced across devices'; c = busy ? 'wait' : 'ok'; }
+  else if (meta.mode === 'cloud') {
+    const busy = Object.keys(dirty).some(k => dirty[k]) || Object.keys(writing).some(k => writing[k]);
+    if (Cloud.state === 'offline') { t = have.profile ? 'Offline — saved on this device' : 'Offline'; c = 'warn'; }
+    else if (Cloud.state === 'error') { t = 'Sync problem'; c = 'warn'; }
+    else if (!meta.synced) { t = 'Connecting…'; c = 'wait'; }
+    else { t = busy ? 'Saving…' : 'Synced'; c = busy ? 'wait' : 'ok'; }
+  }
   else if (meta.mode === 'local') { t = meta.lsFail === 'blocked' ? 'Not saved: this browser/preview blocks storage' : meta.lsFail === 'full' ? 'Not saved: browser storage is full' : 'Saved on this device only'; c = meta.lsFail ? 'warn' : 'local'; }
   el.className = 'sync ' + c; el.lastElementChild.textContent = t;
 }
@@ -3107,7 +3309,7 @@ function privacySection() {
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Sign-in & security'),
       securityCopy()),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Data management'),
-      h('p', { class: 'psmall' }, meta.mode === 'db' ? 'Your CASE! data (tasks, notes, folders, moodboards, settings) is private to your account and synced across your devices.'
+      h('p', { class: 'psmall' }, meta.mode === 'db' || meta.mode === 'cloud' ? 'Your CASE! data (tasks, notes, folders, moodboards, settings) is private to your account and synced across your devices.'
         : 'Your CASE! data (tasks, notes, folders, moodboards, settings) is saved in this browser only. It isn\u2019t synced across devices yet.'),
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data as JSON'),
@@ -3129,7 +3331,7 @@ function accountSection() {
       h('div', { class: 'kv' }, h('span', {}, 'Name'), h('span', {}, p.name || '—')),
       h('div', { class: 'kv' }, h('span', {}, 'Username'), h('span', {}, p.username || '—')),
       h('div', { class: 'kv' }, h('span', {}, 'Email'), h('span', {}, (meta.me && meta.me.email) || (meta.mode === 'db' ? 'Managed by your Claude account' : (Auth.session && Auth.session.user.email) || '—'))),
-      h('div', { class: 'kv' }, h('span', {}, 'Sync'), h('span', {}, meta.mode === 'db' ? 'Synced across devices' : 'Saved on this device only'))),
+      h('div', { class: 'kv' }, h('span', {}, 'Sync'), h('span', {}, meta.mode === 'db' || meta.mode === 'cloud' ? 'Synced across devices' : 'Saved on this device only'))),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Sign-in'),
       h('div', { class: 'kv' }, h('span', {}, 'Status'), h('span', {}, Auth.isPreview() ? 'Preview session (no real account)' : 'Signed in')),
       h('div', { class: 'kv' }, h('span', {}, 'Signed in as'), h('span', {}, (Auth.session && Auth.session.user.email) || '—')),
@@ -3137,12 +3339,13 @@ function accountSection() {
       h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', onclick: signOutFlow }, ic('logout', 16), 'Sign out'))),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Export & delete'),
       h('p', { class: 'psmall' }, meta.mode === 'db' ? 'Deleting your Claude account itself is done from claude.ai account settings, not here. This clears only what CASE! has stored.'
-        : Auth.isPreview() ? 'This clears only what CASE! has stored in this browser.' : 'Deleting your CASE! account itself isn\u2019t available in the app yet. This clears only what CASE! has stored in this browser for your account.'),
+        : Auth.isPreview() ? 'This clears only what CASE! has stored in this browser.' : 'This clears everything CASE! has stored for your account, on every device. Deleting the account itself isn\u2019t available in the app yet.'),
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data'),
         h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Delete all CASE! data'))));
 }
 async function clearAllData() {
+  if (meta.mode === 'cloud' && (!meta.synced || Cloud.state !== 'ok')) { toast('CASE! can’t reach your account right now. Reconnect, then try again.', 'err'); return; }
   if (!await confirmBox('Delete all CASE! data?', 'This removes every task, note, event, folder, file, and moodboard — permanently, on every device. This cannot be undone.', 'Delete everything')) return;
   Object.keys(have).forEach(k => removeKey(k));
   Object.keys(S).forEach(k => delete S[k]);
@@ -4190,9 +4393,10 @@ function stampHistory() { try { if (!(history.state && history.state[HIST_STAMP]
 function cameViaHistory() { try { return !!(history.state && history.state[HIST_STAMP]); } catch (e) { return false; } }
 
 async function signOutFlow() {
-  const ok = await new Promise(res => openModal({ title: 'Sign out of CASE!?', content: h('p', { class: 'mtext' }, Auth.isPreview() ? 'You’ll return to the welcome page. In this preview, your CASE! data stays saved in this browser and reappears when you sign in again.' : 'You’ll return to the welcome page. Your CASE! data stays saved in this browser for your account and reappears when you sign in again.'),
+  const ok = await new Promise(res => openModal({ title: 'Sign out of CASE!?', content: h('p', { class: 'mtext' }, Auth.isPreview() ? 'You’ll return to the welcome page. In this preview, your CASE! data stays saved in this browser and reappears when you sign in again.' : 'You’ll return to the welcome page. Your CASE! data stays safe in your account and is there when you sign in again, on any device.'),
     actions: [{ label: 'Cancel', value: false }, { label: 'Sign out', kind: 'primary', value: true }], onClose: v => res(v === true) }));
   if (!ok) return;
+  if (meta.mode === 'cloud') await cloudDrain(3000);
   await Auth.signOut(); toast('Signed out.');
 }
 
@@ -4214,7 +4418,7 @@ function popStar(cls, fill = '#ffe38f') {
 }
 function pubFooter() {
   return h('footer', { class: 'pub-wrap pub-foot' },
-    h('div', {}, h('span', { class: 'brand-mark' }, 'CASE!', popStar(null, '#ffb3a7')), h('div', {}, Auth.isPreview() ? 'Preview build. Accounts aren’t connected yet, so what you create is saved in this browser.' : 'Accounts are live. For now, what you create is saved in the browser you use.')),
+    h('div', {}, h('span', { class: 'brand-mark' }, 'CASE!', popStar(null, '#ffb3a7')), h('div', {}, Auth.isPreview() ? 'Preview build. Accounts aren’t connected yet, so what you create is saved in this browser.' : 'Accounts are live, and your CASE! data syncs across your devices.')),
     h('nav', { 'aria-label': 'Account' }, h('a', { href: '#/signin' }, 'Sign in'), h('a', { href: '#/signup' }, 'Create account')));
 }
 function peekPreview() {
@@ -4466,7 +4670,7 @@ const AUTH_SIDES = {
   forgot: { h: 'It happens to everyone.', p: 'Once accounts are connected, a reset link will arrive by email.', perks: [] },
   reset: { h: 'A fresh start.', p: 'Pick a new password and you’re back in.', perks: [] }
 };
-const AUTH_SIDES_REAL = { forgot: { p: 'We’ll email you a secure link to choose a new password.' } };
+const AUTH_SIDES_REAL = { signin: { p: 'Everything you saved is waiting for you, on any device.' }, forgot: { p: 'We’ll email you a secure link to choose a new password.' } };
 function authShell(title, sub, body, kind = 'signin') {
   const side = { ...(AUTH_SIDES[kind] || AUTH_SIDES.signin), ...(!Auth.isPreview() && AUTH_SIDES_REAL[kind] || {}) };
   const art = h('div', { class: 'auth-art' }); art.innerHTML = doodleSVG(20260925);
@@ -4657,8 +4861,8 @@ function render() {
   document.body.classList.toggle('public', isPublic);
   document.body.dataset.page = r.page;   // per-page accent (CSS: body[data-page=…])
   const main = $('#view');
-  let node;
-  try {
+  let node = isPublic ? null : cloudBlockedView();
+  if (!node) try {
     node = r.page === 'welcome' ? viewWelcome() : r.page === 'signin' ? viewSignIn() : r.page === 'signup' ? viewSignUp() : r.page === 'forgot' ? viewForgot() : r.page === 'reset' ? viewReset() :
       r.page === 'home' ? viewHome() : r.page === 'todo' ? viewTodo() : r.page === 'calendar' ? viewCalendar(r.arg) : r.page === 'notes' ? viewNotes(r.arg) : r.page === 'folders' ? viewFolders(r.arg) : r.page === 'settings' ? viewSettings(r.arg) : r.page === 'admin' ? viewAdmin(r.arg) : viewBoard(r.arg);
   } catch (e) {
@@ -4695,9 +4899,14 @@ async function boot() {
   if (real) await Promise.race([roleKnown, new Promise(r => setTimeout(r, 5000))]);
   window.addEventListener('beforeunload', flushAll);
   document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
-  if (real) {                                  // Batch 1: real sign-in; data stays in this browser, per account
-    meta.mode = 'local'; meta.assets = null;
+  if (real) {                                  // Supabase: real sign-in + cloud sync
+    meta.assets = null;
     finishAuthCallback(cb);
+    cloudListeners();
+    if (Auth.session) {
+      const first = cloudSync(true);
+      if (!have.profile) await Promise.race([first, sleepMs(12000)]);   // new device: wait for the cloud behind the boot screen
+    }
     finishBoot(); paintStatus(); return;
   }
   let db = null, user = null, assets = null;
@@ -4785,8 +4994,8 @@ function admEnvRows() {
   const supa = !!(AUTH_CONFIG.supabase.url && AUTH_CONFIG.supabase.anonKey);
   return [
     kv('Sign-in', Auth.isPreview() ? admBadge('warn', 'Preview only, no real accounts') : SupabaseAuth.client ? admBadge('ok', 'Supabase Auth') : admBadge('warn', 'Supabase not reachable')),
-    kv('Data storage', meta.mode === 'db' ? admBadge('ok', 'Claude artifact storage, private per person') : meta.lsFail ? admBadge('warn', 'Not saving: browser storage blocked or full') : admBadge('warn', 'This browser only')),
-    kv('Backend (Supabase)', AUTH_CONFIG.mode === 'supabase' ? admBadge('warn', 'Sign-in and roles only; data not synced yet') : supa ? admBadge('warn', 'Keys added, not in use yet') : notConnected()),
+    kv('Data storage', meta.mode === 'cloud' ? (Cloud.state === 'ok' ? admBadge('ok', 'Supabase, private per person') : admBadge('warn', 'Supabase, not reachable right now')) : meta.mode === 'db' ? admBadge('ok', 'Claude artifact storage, private per person') : meta.lsFail ? admBadge('warn', 'Not saving: browser storage blocked or full') : admBadge('warn', 'This browser only')),
+    kv('Backend (Supabase)', AUTH_CONFIG.mode === 'supabase' ? admBadge('ok', 'Sign-in, roles, and data sync') : supa ? admBadge('warn', 'Keys added, not in use yet') : notConnected()),
     kv('Admin access', Access.provider.isReal ? admBadge('ok', 'Checked by the server') : admBadge('warn', 'Development test list, not secure'))
   ];
 }
