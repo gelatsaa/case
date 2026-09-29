@@ -1745,6 +1745,27 @@ body[data-page="admin"] .page .adm-stat.off{ border-style:dashed; border-color:v
 .adm-table td:first-child{ min-width:170px; }
 .adm-table small{ display:block; color:var(--ink3); font-size:12px; font-weight:600; }
 .adm-acts{ display:flex; gap:6px; flex-wrap:wrap; }
+.adm-rel-name{ display:flex; flex-direction:column; gap:2px; min-width:0; white-space:normal; }
+.adm-rel-notes{ display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; max-width:360px; white-space:pre-wrap; }
+.adm-rel-title{ margin:6px 0 2px; font-weight:800; color:var(--ink); }
+.adm-table.adm-rels{ min-width:0; }
+.adm-table.adm-rels td:first-child{ min-width:0; }
+.adm-table.adm-rels td:nth-child(2){ white-space:normal; min-width:140px; }
+.adm-table.adm-rels td:last-child .adm-acts{ flex-wrap:wrap; }
+@media (max-width:640px){
+  .adm-table.adm-rels{ min-width:0; }
+  .adm-table.adm-rels thead{ display:none; }
+  .adm-table.adm-rels, .adm-table.adm-rels tbody, .adm-table.adm-rels tr, .adm-table.adm-rels td{ display:block; }
+  .adm-table.adm-rels tr{ padding:12px 14px; border-bottom:1px dashed var(--line); }
+  .adm-table.adm-rels tr:last-child{ border-bottom:none; }
+  .adm-table.adm-rels td, .adm-table.adm-rels td:not(:first-child), .adm-table.adm-rels td:first-child{ padding:3px 0; border-bottom:none; white-space:normal; min-width:0; }
+  .adm-table.adm-rels td[data-label]{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .adm-table.adm-rels td[data-label]::before{ content:attr(data-label); font-size:12px; font-weight:800; color:var(--ink3); flex:none; }
+  .adm-table.adm-rels td[data-label] > *{ text-align:right; }
+  .adm-table.adm-rels .adm-rel-notes{ max-width:none; }
+  .adm-table.adm-rels td:last-child{ padding-top:8px; }
+  .adm-table.adm-rels .adm-acts{ flex-wrap:wrap; }
+}
 /* Admin → Users on phones: each account becomes a stacked block (no sideways swiping) */
 @media (max-width:640px){
   .adm-table.adm-users{ min-width:0; }
@@ -2228,7 +2249,11 @@ const Shared = { ann: [], rel: [], status: null, loaded: false, statusLoaded: fa
 function sharedOn() { return AUTH_CONFIG.mode === 'supabase' && typeof SupabaseAuth !== 'undefined' && !!SupabaseAuth.client; }
 const tsMs = v => v ? new Date(v).getTime() : null;
 function mapAnn(r) { return { id: r.id, title: r.title, message: r.message, version: r.version || '', status: r.status, publishAt: tsMs(r.publish_at), publishedAt: tsMs(r.published_at), archivedAt: tsMs(r.archived_at), created: tsMs(r.created_at), updated: tsMs(r.updated_at) }; }
-function mapRel(r) { return { id: r.id, version: r.version, date: r.release_date, notes: r.notes || '', current: !!r.is_current, published: !!r.published, created: tsMs(r.created_at), updated: tsMs(r.updated_at) }; }
+function mapRel(r) { return { id: r.id, version: r.version, title: r.title || '', date: r.release_date, notes: r.notes || '', current: !!r.is_current, published: !!r.published, created: tsMs(r.created_at), updated: tsMs(r.updated_at) }; }
+/* Releases: read only the public columns. Before batch3b-releases.sql has run (no "title"
+   column yet), that list fails, so fall back to the old full read. */
+const REL_COLS = 'id,version,title,release_date,notes,is_current,published,created_at,updated_at';
+async function relSelect(c) { const r = await c.from('releases').select(REL_COLS); return r.error ? c.from('releases').select('*') : r; }
 function sharedReset() { Object.assign(Shared, { ann: [], rel: [], loaded: false, loading: null, stats: null, statsErr: false, users: null, usersErr: false }); }
 /* quiet = the caller redraws itself (admin actions) */
 function sharedLoad(quiet) {
@@ -2241,7 +2266,7 @@ function sharedLoad(quiet) {
       if (st.error) throw st.error;
       let ann = [], rel = [];
       if (signed) {
-        const [a, r] = await Promise.all([c.from('announcements').select('*'), c.from('releases').select('*')]);
+        const [a, r] = await Promise.all([c.from('announcements').select('*'), relSelect(c)]);
         if (a.error || r.error) throw (a.error || r.error);
         ann = (a.data || []).map(mapAnn); rel = (r.data || []).map(mapRel);
       }
@@ -3443,6 +3468,7 @@ function aboutCard() {
   const r = Shared.rel.find(x => x.current && x.published);
   return h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'About CASE!'),
     r ? [h('div', { class: 'kv' }, h('span', {}, 'Version'), h('span', {}, verLabel(r.version))),
+      r.title ? h('div', { class: 'kv' }, h('span', {}, 'Name'), h('span', {}, r.title)) : null,
       h('div', { class: 'kv' }, h('span', {}, 'Released'), h('span', {}, parseYmd(r.date).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }))),
       r.notes ? h('p', { class: 'psmall', style: { margin: '12px 0 4px' } }, h('b', {}, 'What’s new')) : null,
       r.notes ? h('p', { class: 'adm-notes' }, r.notes) : null]
@@ -5145,7 +5171,7 @@ function admOverview(redraw) {
     const s = Shared.stats, v = k => s ? String(s[k]) : (Shared.statsErr ? '—' : '…'), sub = t => s ? t : (Shared.statsErr ? 'Couldn’t load' : 'Loading…');
     const drafts = n('draft');
     tiles = [
-      tile('Current version', rel ? verLabel(rel.version) : 'None set', rel ? 'Released ' + shortDate(rel.date) + (rel.published ? '' : ', hidden') : 'Add one in Releases'),
+      tile('Current version', rel ? verLabel(rel.version) : 'None set', rel ? (rel.title ? rel.title + ', released ' : 'Released ') + shortDate(rel.date) + (rel.published ? '' : ', hidden') : 'Add one in Releases'),
       tile('Live announcements', String(n('published')), [drafts + (drafts === 1 ? ' draft' : ' drafts'), n('scheduled') + ' scheduled', n('archived') + ' archived'].join(', ')),
       tile('Total users', v('total_users'), sub(s ? `${s.confirmed_users} confirmed, ${s.admins} ${+s.admins === 1 ? 'admin' : 'admins'}` : ''), !s),
       tile('New this week', v('new_7d'), sub(s ? `${s.new_30d} in the last 30 days` : ''), !s),
@@ -5435,6 +5461,7 @@ function admReleases(redraw) {
     ad.releases = ad.releases.filter(x => x.id !== r.id); save('admin'); toast('Release deleted.'); redraw();
   };
   const vis = r => cloud ? h('span', { class: 'adm-pill ' + (r.published ? 'published' : 'draft') }, r.published ? 'Visible' : 'Hidden') : null;
+  if (cloud) return admReleasesCloud(redraw, list, cur, setCurrent, del, vis);
   return h('div', { class: 'adm-stack' },
     h('div', { class: 'card settle' },
       h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Current version'), h('button', { class: 'btn primary', type: 'button', onclick: () => releaseModal(null, redraw) }, ic('plus', 16), 'Add release')),
@@ -5455,9 +5482,46 @@ function admReleases(redraw) {
     h('div', { class: 'card settle' }, h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Deployment'), notConnected()),
       h('p', { class: 'psmall' }, cloud ? 'CASE! is deployed from GitHub by Vercel. Nothing on this page changes a deployment; live build details aren’t connected here.' : 'Once CASE! is deployed on Vercel, the live build, its GitHub commit, and the environment can show here.')));
 }
+function admReleasesCloud(redraw, list, cur, setCurrent, del, vis) {
+  const longDate = d => parseYmd(d).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' });
+  const setVisible = async (r, on) => {
+    const x = await sbRun(sbc().from('releases').update({ published: on }).eq('id', r.id));
+    if (x.error) { toast(admErrMsg(x.error, 'Couldn’t change it. Please try again.'), 'err'); return; }
+    await sharedLoad(true); toast(on ? verLabel(r.version) + ' is now visible to users.' : verLabel(r.version) + ' is now hidden from users.'); redraw();
+  };
+  const makeCurrent = async r => { await setCurrent(r.id); if (!r.published) toast(verLabel(r.version) + ' is current but hidden, so people won’t see it until you make it visible.'); };
+  const rows = list.map(r => h('tr', { 'data-id': r.id },
+    h('td', {}, h('b', {}, verLabel(r.version))),
+    h('td', { 'data-label': 'Title' }, h('div', { class: 'adm-rel-name' }, r.title || h('span', { class: 'psmall' }, 'No title'),
+      r.notes ? h('small', { class: 'adm-rel-notes' }, r.notes) : null)),
+    h('td', { 'data-label': 'Date' }, shortDate(r.date) + ', ' + parseYmd(r.date).getFullYear()),
+    h('td', { 'data-label': 'Status' }, h('span', { class: 'adm-acts' }, r.current ? h('span', { class: 'adm-pill current' }, 'Current') : null, vis(r))),
+    h('td', {}, h('div', { class: 'adm-acts' },
+      r.current ? null : h('button', { class: 'btn sm', type: 'button', onclick: () => makeCurrent(r) }, 'Set as current'),
+      h('button', { class: 'btn sm', type: 'button', onclick: () => setVisible(r, !r.published) }, r.published ? 'Hide' : 'Make visible'),
+      h('button', { class: 'btn sm', type: 'button', onclick: () => releaseModal(r, redraw) }, ic('edit', 15), 'Edit'),
+      h('button', { class: 'btn sm danger', type: 'button', onclick: () => del(r) }, ic('trash', 15), 'Delete')))));
+  return h('div', { class: 'adm-stack' },
+    h('div', { class: 'card settle' },
+      h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Current release'), h('button', { class: 'btn primary', type: 'button', onclick: () => releaseModal(null, redraw) }, ic('plus', 16), 'New release')),
+      cur ? h('div', {}, h('div', { class: 'adm-rel-cur' }, h('span', { class: 'adm-rel-v' }, 'CASE! ' + verLabel(cur.version)), vis(cur)),
+        cur.title ? h('p', { class: 'adm-rel-title' }, cur.title) : null,
+        h('p', { class: 'psmall' }, 'Released ' + longDate(cur.date)),
+        cur.notes ? h('p', { class: 'adm-notes' }, cur.notes) : null)
+        : h('p', { class: 'psmall' }, 'No current release yet. Add one and mark it as current.'),
+      h('p', { class: 'psmall adm-card-note' }, 'The current release, if visible, shows in everyone’s Settings → Account. Releases are notes for people using CASE!; they don’t deploy anything. Deployments happen through GitHub and Vercel.')),
+    admCopyCard('releases', redraw),
+    h('div', { class: 'card settle' },
+      h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Release history'), admBadge(list.length ? 'ok' : 'off', list.length + (list.length === 1 ? ' release' : ' releases'))),
+      list.length ? h('div', { class: 'adm-tablewrap' }, h('table', { class: 'adm-table adm-rels' },
+        h('thead', {}, h('tr', {}, ['Version', 'Title', 'Date', 'Status', 'Actions'].map(t => h('th', { scope: 'col' }, t)))),
+        h('tbody', {}, rows)))
+        : h('p', { class: 'psmall' }, 'No releases recorded yet.')));
+}
 function releaseModal(existing, redraw) {
   const cloud = admCloud(), ad = admList();
   const ver = h('input', { class: 'field', value: existing ? verLabel(existing.version) : '', maxlength: 24, placeholder: 'e.g. v1.4.0' });
+  const ttl = cloud ? h('input', { class: 'field', value: existing ? existing.title || '' : '', maxlength: 80, placeholder: 'e.g. Cloud sync' }) : null;
   const date = h('input', { class: 'field', type: 'date', value: existing ? existing.date : ymd(new Date()) });
   const notes = h('textarea', { class: 'field', rows: 5, maxlength: 1500, placeholder: 'What’s new in this release?' }); notes.value = existing ? existing.notes || '' : '';
   const curBox = h('input', { type: 'checkbox', checked: existing ? !!existing.current : true });
@@ -5475,13 +5539,14 @@ function releaseModal(existing, redraw) {
       saving = true;
       (async () => {
         const row = { version: v, release_date: date.value, notes: notes.value.trim(), published: visBox.checked };
+        const t = ttl.value.trim(); if (t || (existing && existing.title)) row.title = t || null;
         let id = existing && existing.id, r;
         if (existing) r = await sbRun(sbc().from('releases').update(row).eq('id', id));
         else { r = await sbRun(sbc().from('releases').insert(row).select('id').single()); if (!r.error) id = r.data && r.data.id; }
         if (!r.error && curBox.checked && !(existing && existing.current)) r = await sbRun(sbc().rpc('admin_set_current_release', { p_id: id }));
         else if (!r.error && !curBox.checked && existing && existing.current) r = await sbRun(sbc().from('releases').update({ is_current: false }).eq('id', id));
         saving = false;
-        if (r.error) { err.textContent = admErrMsg(r.error, 'Couldn’t save the release. Please try again.'); await sharedLoad(true); return; }
+        if (r.error) { err.textContent = /title/.test(String(r.error.message || '')) && /column|schema/.test(String(r.error.message || '')) ? 'Titles need the Releases database update (batch3b-releases.sql). Leave the title empty for now, or run the update first.' : admErrMsg(r.error, 'Couldn’t save the release. Please try again.'); await sharedLoad(true); return; }
         await sharedLoad(true); close(true); toast(existing ? 'Release updated.' : 'Release added.'); redraw();
       })();
       return;
@@ -5492,8 +5557,9 @@ function releaseModal(existing, redraw) {
     if (curBox.checked) ad.releases.forEach(x => x.current = x === r); else r.current = false;
     save('admin'); close(true); toast(existing ? 'Release updated.' : 'Release added.'); redraw();
   };
-  openModal({ title: existing ? 'Edit release' : 'Add release', wide: true,
+  openModal({ title: existing ? 'Edit release' : cloud ? 'New release' : 'Add release', wide: true,
     content: h('div', { class: 'pform' }, h('div', { class: 'two' }, h('label', { class: 'flabel' }, 'Version', ver), h('label', { class: 'flabel' }, 'Release date', date)),
+      ttl ? h('label', { class: 'flabel' }, 'Title (optional)', ttl) : null,
       h('label', { class: 'flabel' }, 'Release notes', notes), h('label', { class: 'adm-check' }, curBox, 'This is the current version'),
       visBox ? h('label', { class: 'adm-check' }, visBox, 'Visible to users') : null, err),
     actions: [{ label: 'Cancel', value: null }, { label: existing ? 'Save changes' : 'Add release', kind: 'primary', onclick: submit }] });
