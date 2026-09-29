@@ -2073,6 +2073,7 @@ function useAccountData(sess) {
   Cloud.state = 'connecting'; Cloud.fails = 0; Cloud.pulling = null; Cloud.lastPull = 0;
   LS = prefix; meta.uid = id; meta.synced = false; meta.loadFailed = false;
   meta.mode = id ? 'cloud' : 'local';
+  meta.assets = id ? SbAssets : null; SbUrls.clear(); sbPending.clear();
   if (prefix) loadLocal();                            // this account's offline copy (never seeded here)
   if (meta.booted) {
     if (id) cloudSync(true);                          // start the download first: a display hiccup below must never block syncing
@@ -2138,6 +2139,7 @@ function cloudSync(first) {
       if (!meta.synced && remote.size === 0 && !Object.keys(have).length) {
         meta.synced = true; Cloud.lastPull = Date.now(); cloudOk(true);
         seed();                                         // saves -> uploads
+        sbAfterSync();
         if (meta.booted) remoteChanged();
         return true;
       }
@@ -2166,7 +2168,7 @@ function cloudSync(first) {
         });
       }
       meta.synced = true; Cloud.lastPull = Date.now(); cloudOk(true);
-      processDeletes();
+      processDeletes(); sbAfterSync();
       if (meta.booted && (changed.size || wasBlocked)) remoteChanged();
       return true;
     } catch (e) {
@@ -2452,10 +2454,130 @@ function fileType(f) { const t = (f.type || '').split(';')[0].toLowerCase(); if 
 async function uploadAsset(file) {
   if (!meta.assets) throw new Error('no-assets');
   const type = fileType(file); if (!type) throw new Error('bad-type');
-  return meta.assets.upload(file, { type });
+  return meta.assets.upload(file, { type, dir: 'files' });
 }
 function dropAsset(id) { if (id && meta.assets) meta.assets.delete(id).catch(() => { }); }
-const assetUrl = id => '/_blob/' + id;
+function assetUrl(id) {
+  if (isSb(id)) { const c = SbUrls.get(id); if (!c || c.exp - Date.now() < 600000) sbSign([id]); return c && c.exp > Date.now() + 5000 ? c.url : sbPh(id); }
+  return '/_blob/' + id;
+}
+
+/* ================= Supabase Storage (Batch 4) =================
+   One PRIVATE bucket. Every file lives under "<user id>/profile|boards|files/<random>.<ext>";
+   the bucket's security rules only let people read, upload, and delete inside their own folder.
+   Saved references look like { asset: "sb:<path>" }. Files are shown through short-lived signed
+   links (1 hour), requested in batches and cached. Nothing is deleted right away: removed files
+   go on a per-account "to delete" list that is processed the next time CASE! opens, and only for
+   files nothing in the account still uses (so Undo and other devices stay safe). */
+const SB_BUCKET = 'case-user-files', SB_MAX_BYTES = 20 * 1048576, SB_TTL = 3600;
+const SB_TYPES = OK_TYPES.filter(t => t !== 'image/svg+xml');          // SVG can contain scripts: not allowed
+const SB_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'video/mp4': 'mp4', 'video/webm': 'webm',
+  'application/pdf': 'pdf', 'text/csv': 'csv', 'text/markdown': 'md', 'application/json': 'json', 'text/plain': 'txt' };
+const isSb = id => typeof id === 'string' && id.startsWith('sb:');
+const sbKey = id => id.slice(3);
+const SB_SESSION_START = Date.now();
+function sbRandom() { try { return crypto.randomUUID(); } catch (e) { return uid() + uid() + Date.now().toString(36); } }
+function sbStorageErr(e) {
+  const m = String((e && (e.message || e.error)) || ''), st = String((e && (e.statusCode || e.status)) || ''), x = new Error(m);
+  if (st === '413' || /too large|maximum allowed size|exceeded/i.test(m)) x.code = 'too_large';
+  else if (st === '415' || /mime type|not supported|invalid_mime/i.test(m)) x.message = 'bad-type';
+  else if (st === '403' || /row-level security|unauthorized|not allowed/i.test(m)) x.code = 'denied';
+  else x.code = 'offline';
+  return x;
+}
+const SbAssets = {
+  async upload(blob, opts = {}) {
+    if (!cloudOn()) { const e = new Error('offline'); e.code = 'offline'; throw e; }
+    const type = String(opts.type || blob.type || '').split(';')[0].toLowerCase();
+    if (!SB_TYPES.includes(type)) throw new Error('bad-type');
+    if (blob.size > SB_MAX_BYTES) { const e = new Error('too_large'); e.code = 'too_large'; throw e; }
+    const path = `${meta.uid}/${opts.dir || 'files'}/${sbRandom()}.${SB_EXT[type]}`, gen = meta.gen;
+    let r; try { r = await sbc().storage.from(SB_BUCKET).upload(path, blob, { contentType: type, upsert: false, cacheControl: '3600' }); } catch (e) { r = { error: e }; }
+    if (r.error) throw sbStorageErr(r.error);
+    if (gen !== meta.gen) { const e = new Error('switched'); e.code = 'offline'; throw e; }
+    return { id: 'sb:' + path, contentType: type, sizeBytes: blob.size };
+  },
+  delete(id) { if (isSb(id)) sbQueueDrop(id); return Promise.resolve(); }
+};
+/* the per-account "to delete" list (stored with this account's browser copy) */
+function sbDropList() { const w = lsGet('__drop'); return w && Array.isArray(w.v) ? w.v : []; }
+function sbDropSet(a) { if (!a.length) lsDel('__drop'); else lsSet('__drop', a, Date.now()); }
+function sbQueueDrop(id) { const l = sbDropList(); if (!l.some(x => x.id === id)) { l.push({ id, at: Date.now() }); sbDropSet(l); } }
+function sbRefs() { const out = new Set(), re = /"(sb:[^"\\]+)"/g; let m; const txt = JSON.stringify(Object.keys(have).map(k => S[k])); while ((m = re.exec(txt))) out.add(m[1]); return out; }
+async function sbSweep() {
+  const gen = meta.gen, due = sbDropList().filter(x => x.at < SB_SESSION_START);
+  if (!due.length || !cloudOn()) return;
+  const used = sbRefs(), done = new Set(), del = [];
+  due.forEach(x => { if (used.has(x.id)) done.add(x.id); else del.push(x.id); });   // still used (e.g. Undo) -> just forget it
+  for (let i = 0; i < del.length; i += 100) {
+    const chunk = del.slice(i, i + 100), r = await sbRun(sbc().storage.from(SB_BUCKET).remove(chunk.map(sbKey)));
+    if (gen !== meta.gen) return;
+    if (!r.error) chunk.forEach(id => done.add(id));
+  }
+  sbDropSet(sbDropList().filter(x => !done.has(x.id)));
+}
+/* signed links */
+const SbUrls = new Map(), sbPending = new Set(); let sbTimer = null, sbWaiters = [];
+const SB_PH_MARK = encodeURIComponent('<desc>sb:');
+function sbPh(id) { return 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="3"><desc>' + id + '</desc></svg>'); }
+function sbIdFromPh(v) { const i = v.indexOf('data:image/svg+xml,'); if (i < 0) return null; const m = decodeURIComponent(v.slice(i + 19).replace(/["')]+$/, '')).match(/<desc>(sb:[^<]+)<\/desc>/); return m ? m[1] : null; }
+function sbSign(ids) {
+  const need = ids.filter(id => isSb(id) && !(SbUrls.get(id) && SbUrls.get(id).exp - Date.now() > 600000));
+  if (!need.length || !cloudOn()) return Promise.resolve();
+  need.forEach(id => sbPending.add(id));
+  return new Promise(res => { sbWaiters.push(res); clearTimeout(sbTimer); sbTimer = setTimeout(sbFlushSign, 30); });
+}
+async function sbFlushSign() {
+  const ids = [...sbPending], waiters = sbWaiters, gen = meta.gen; sbPending.clear(); sbWaiters = [];
+  for (let i = 0; i < ids.length && cloudOn(); i += 100) {
+    const chunk = ids.slice(i, i + 100), r = await sbRun(sbc().storage.from(SB_BUCKET).createSignedUrls(chunk.map(sbKey), SB_TTL));
+    if (gen !== meta.gen) break;
+    if (!r.error) (r.data || []).forEach(x => { const u = x && (x.signedUrl || x.signedURL); if (u && !x.error) SbUrls.set('sb:' + x.path, { url: u, exp: Date.now() + SB_TTL * 1000 }); });
+  }
+  if (gen === meta.gen) sbPatchDom();
+  waiters.forEach(w => w());
+}
+/* swap placeholders for real links in place (no page redraw, so typing isn't interrupted) */
+function sbPatchDom() {
+  const fill = id => { const c = id && SbUrls.get(id); return c && c.exp > Date.now() ? c.url : null; };
+  $$('img').forEach(el => { const v = el.getAttribute('src') || ''; if (v.includes(SB_PH_MARK)) { const u = fill(sbIdFromPh(v)); if (u) el.src = u; } });
+  $$('a[href]').forEach(el => { const v = el.getAttribute('href') || ''; if (v.includes(SB_PH_MARK)) { const u = fill(sbIdFromPh(v)); if (u) el.href = u; } });
+  $$('[style*="svg+xml"]').forEach(el => { const v = el.style.backgroundImage || ''; if (v.includes(SB_PH_MARK)) { const u = fill(sbIdFromPh(v)); if (u) el.style.backgroundImage = `url("${u}")`; } });
+}
+function sbPrefetch() { return sbSign([...sbRefs()]); }
+/* called by the Batch 2 sync after every successful download */
+function sbAfterSync() {
+  if (!cloudOn()) return;
+  sbPrefetch();
+  if (meta.sweptGen !== meta.gen) { meta.sweptGen = meta.gen; sbSweep(); }
+}
+/* open (fresh link, new tab) or download (keeps the original file name) */
+async function sbOpen(id, name, download) {
+  const w = download ? null : window.open('', '_blank');
+  const r = await sbRun(sbc().storage.from(SB_BUCKET).createSignedUrl(sbKey(id), 300, download ? { download: name || true } : undefined));
+  const url = r.data && (r.data.signedUrl || r.data.signedURL);
+  if (!url) { if (w) w.close(); toast('Couldn’t open that file. Check your connection and try again.', 'err'); return; }
+  if (download) { const a = h('a', { href: url, download: name || '', hidden: true }); appendKids(document.body, a); a.click(); setTimeout(() => a.remove(), 1000); }
+  else if (w) { try { w.opener = null; } catch (e) { } w.location.href = url; }
+  else location.href = url;
+}
+/* "Delete all CASE! data": remove every file in this account's folder */
+async function sbDeleteAll() {
+  if (!cloudOn()) return;
+  const b = sbc().storage.from(SB_BUCKET), paths = [];
+  for (const dir of ['profile', 'boards', 'files']) {
+    for (let off = 0; ; off += 1000) {
+      const r = await sbRun(b.list(`${meta.uid}/${dir}`, { limit: 1000, offset: off })), d = (r.data || []).filter(o => o && o.name && o.id !== null);
+      d.forEach(o => paths.push(`${meta.uid}/${dir}/${o.name}`));
+      if ((r.data || []).length < 1000) break;
+    }
+  }
+  for (let i = 0; i < paths.length; i += 100) await sbRun(b.remove(paths.slice(i, i + 100)));
+  sbDropSet([]);
+}
+const FILE_TYPE_LABEL = { 'image/png': 'PNG image', 'image/jpeg': 'JPEG image', 'image/gif': 'GIF image', 'image/webp': 'WebP image', 'image/svg+xml': 'SVG image',
+  'video/mp4': 'MP4 video', 'video/webm': 'WebM video', 'application/pdf': 'PDF', 'text/csv': 'CSV', 'text/markdown': 'Markdown', 'application/json': 'JSON', 'text/plain': 'Text' };
+const fileTypeLabel = t => FILE_TYPE_LABEL[String(t || '').split(';')[0]] || 'File';
 /* Shared image loader for the cropper (profile photo, banner, moodboard) and storeImage().
    Reads the file as a data: URL (blob: object URLs are blocked by the published artifact's image
    policy, which left images in the 'broken' state and made drawImage() throw). Resolves ONLY when
@@ -2499,8 +2621,8 @@ async function prepImage(file, maxDim, asData) {
 }
 function savedNote(what) { return meta.mode === 'local' && meta.lsFail ? `${what} updated for now, but this browser/preview blocks storage, so it won’t be kept after a refresh.` : `${what} updated.`; }
 /* store an image either as an asset (owner) or as a small inline picture (fallback) */
-async function storeImage(file, maxDim = 1600, inlineDim = 420) {
-  if (meta.assets) { const p = await prepImage(file, maxDim, false); const up = await meta.assets.upload(p.blob, { type: p.blob.type || fileType(file) || 'image/jpeg' }); return { asset: up.id, w: p.w, h: p.h }; }
+async function storeImage(file, maxDim = 1600, inlineDim = 420, dir = 'boards') {
+  if (meta.assets) { const p = await prepImage(file, maxDim, false); const up = await meta.assets.upload(p.blob, { type: p.blob.type || fileType(file) || 'image/jpeg', dir }); if (isSb(up.id)) await sbSign([up.id]); return { asset: up.id, w: p.w, h: p.h }; }
   const p = await prepImage(file, inlineDim, true); return { data: p.data, w: p.w, h: p.h };
 }
 
@@ -2832,8 +2954,8 @@ function defaultAvatar(name) {
 }
 /* shared image flow (file chooser -> existing cropper -> storeImage -> profile) used by Settings and Home */
 function pickImageFile(fn) { const i = h('input', { type: 'file', accept: 'image/*', hidden: true }); appendKids(document.body, i); i.addEventListener('change', async () => { const f = i.files[0]; i.remove(); if (f) { try { await fn(f); } catch (e) { toast('That image could not be used. Try a PNG or JPG.', 'err'); } } }); i.click(); }
-function changeProfilePhoto(after) { pickImageFile(async f => { const blob = await openCropper(f, { aspect: 1, round: true, frameW: 320, title: 'Crop profile photo' }); if (!blob) return; const p = get('profile'), old = p.photo && p.photo.asset; p.photo = await storeImage(blob, 512, 256); if (old) dropAsset(old); save('profile'); paintSide(); toast(savedNote('Photo')); if (after) after(); }); }
-function changeBanner(after) { pickImageFile(async f => { const blob = await openCropper(f, { aspect: 21 / 6, frameW: 460, title: 'Crop banner' }); if (!blob) return; const p = get('profile'), old = p.banner && p.banner.asset; p.banner = await storeImage(blob, 1800, 920); if (old) dropAsset(old); save('profile'); toast(savedNote('Banner')); if (after) after(); }); }
+function changeProfilePhoto(after) { pickImageFile(async f => { const blob = await openCropper(f, { aspect: 1, round: true, frameW: 320, title: 'Crop profile photo' }); if (!blob) return; const p = get('profile'), old = p.photo && p.photo.asset; p.photo = await storeImage(blob, 512, 256, 'profile'); if (old) dropAsset(old); save('profile'); paintSide(); toast(savedNote('Photo')); if (after) after(); }); }
+function changeBanner(after) { pickImageFile(async f => { const blob = await openCropper(f, { aspect: 21 / 6, frameW: 460, title: 'Crop banner' }); if (!blob) return; const p = get('profile'), old = p.banner && p.banner.asset; p.banner = await storeImage(blob, 1800, 920, 'profile'); if (old) dropAsset(old); save('profile'); toast(savedNote('Banner')); if (after) after(); }); }
 function newDoodleBanner(after) { const p = get('profile'), old = p.banner && p.banner.asset; p.banner = null; if (old) dropAsset(old); p.seed = Math.floor(Math.random() * 1e6); save('profile'); toast('New doodle banner.'); if (after) after(); }
 function bannerPreview() { const p = get('profile'), el = h('div', { class: 'banner-prev', role: 'img', 'aria-label': p.banner ? 'Your banner photo' : 'Doodle banner' });
   if (p.banner) el.style.backgroundImage = `url("${p.banner.asset ? assetUrl(p.banner.asset) : p.banner.data}")`; else el.innerHTML = doodleSVG(p.seed); return el; }
@@ -3430,7 +3552,134 @@ function privacySection() {
         : 'Your CASE! data (tasks, notes, folders, moodboards, settings) is saved in this browser only. It isn\u2019t synced across devices yet.'),
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data as JSON'),
-        h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Clear all CASE! data'))));
+        h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Clear all CASE! data'))),
+    legacyImportCard());
+}
+
+/* ================= Import from this browser (legacy "case:v1:" preview data, Batch 4) =================
+   Opt-in only. Backs up first, previews, then ADDS to the signed-in account: nothing in the account
+   is edited or removed, duplicates are skipped by id, and the old preview data is never changed. */
+const LEGACY_PREFIX = 'case:v1:';
+const LEGACY_SAMPLE_TODOS = ['Check this off to start your streak', 'Add a task of your own', 'Grow the plant with a focus session'];
+let legacyBackedUp = false;
+function legacyKeys() { try { return Object.keys(localStorage).filter(k => k.startsWith(LEGACY_PREFIX) && !k.slice(LEGACY_PREFIX.length).startsWith('__')); } catch (e) { return []; } }
+function legacyData() { const out = {}; legacyKeys().forEach(k => { try { const w = JSON.parse(localStorage.getItem(k)); if (w && typeof w === 'object' && 'v' in w) out[k.slice(LEGACY_PREFIX.length)] = w.v; } catch (e) { } }); return out; }
+const legacyArr = v => Array.isArray(v) ? v.filter(x => x && typeof x === 'object' && x.id) : [];
+function legacyPlan(L, o) {
+  const A = { todos: get('todos'), notes: get('notes'), events: get('events'), files: get('files'), boards: get('boards') };
+  const pick = (src, acct, sample) => { const ids = new Set(acct.map(x => x.id)), r = { add: [], skip: 0, samples: 0 };
+    legacyArr(src).forEach(x => { if (ids.has(x.id)) r.skip++; else if (o.skipSamples && sample && sample(x)) r.samples++; else { ids.add(x.id); r.add.push(x); } }); return r; };
+  const lf = L.files || {}, items = pick(lf.items, A.files.items);
+  const oldFiles = items.add.filter(i => i.kind === 'file' && i.asset && !isSb(i.asset)); items.add = items.add.filter(i => !oldFiles.includes(i));
+  const boards = pick(L.boards && L.boards.list, A.boards.list);
+  let images = 0, oldImages = 0;
+  boards.add.forEach(b => legacyArr((L['board_' + b.id] || {}).items).forEach(it => { if (it.type === 'image' && it.data) images++; else if (it.type === 'image' && it.asset && !isSb(it.asset)) oldImages++; }));
+  const lp = L.profile || {}, p = get('profile');
+  const photo = !!(lp.photo && lp.photo.data) && !p.photo, banner = !!(lp.banner && lp.banner.data) && !p.banner;
+  return { todos: pick(L.todos, A.todos, t => LEGACY_SAMPLE_TODOS.includes(t.text)),
+    notes: pick(L.notes, A.notes, n => n.title === 'Welcome to CASE!' && String(n.body || '').includes('This is your notebook')),
+    events: pick(L.events, A.events), folders: pick(lf.folders, A.files.folders), items, boards, images, oldImages, oldFiles: oldFiles.length, photo, banner };
+}
+function legacyBackup() {
+  const keys = {}; legacyKeys().forEach(k => { keys[k] = localStorage.getItem(k); });
+  const blob = new Blob([JSON.stringify({ app: 'CASE!', source: 'preview data (case:v1)', exportedAt: new Date().toISOString(), keys }, null, 2)], { type: 'application/json' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: 'case-preview-backup-' + ymd(new Date()) + '.json', hidden: true });
+  appendKids(document.body, a); a.click(); setTimeout(() => { a.remove(); URL.revokeObjectURL(a.href); }, 1000);
+  legacyBackedUp = true; toast('Preview backup downloaded.');
+}
+function legacyImportCard() {
+  if (AUTH_CONFIG.mode !== 'supabase' || meta.mode !== 'cloud' || !legacyKeys().length) return null;
+  const st = (lsGet('__import') || {}).v || {};
+  if (st.hidden) return null;
+  const card = h('div', { class: 'card settle' });
+  const paint = () => {
+    const L = legacyData(), P = legacyPlan(L, { skipSamples: false }), n = x => x.add.length + x.skip;
+    const found = [[n(P.todos), 'task'], [n(P.notes), 'note'], [n(P.events), 'event'], [n(P.folders), 'folder'], [n(P.items), 'link or file'], [n(P.boards), 'moodboard']]
+      .filter(([c]) => c).map(([c, w]) => c + ' ' + w + (c === 1 ? '' : w === 'link or file' ? 's' : 's')).join(', ');
+    const ready = meta.synced && Cloud.state === 'ok';
+    setKids(card, h('h2', { class: 'set-h' }, 'Import from this browser'),
+      h('p', { class: 'psmall' }, 'This browser still has CASE! data from the preview version, before accounts existed. You can add it to your account. Nothing in your account is replaced, and the preview data stays where it is.'),
+      found ? h('p', { class: 'psmall' }, h('b', {}, 'Found: '), found + '.') : null,
+      st.at ? h('p', { class: 'psmall' }, 'Imported on ' + new Date(st.at).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) + '. Importing again only adds items that aren’t in your account yet.') : null,
+      h('div', { class: 'prow' },
+        h('button', { class: 'btn', type: 'button', onclick: () => { legacyBackup(); paint(); } }, ic('download', 16), legacyBackedUp ? 'Preview backup downloaded' : 'Download preview backup'),
+        h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Download account backup'),
+        h('button', { class: 'btn primary', type: 'button', disabled: !legacyBackedUp || !ready, title: !legacyBackedUp ? 'Download the preview backup first' : !ready ? 'Needs a connection to your account' : null, onclick: () => legacyImportModal(paint) }, 'Review import…'),
+        st.at ? h('button', { class: 'btn ghost', type: 'button', onclick: () => { lsSet('__import', { ...st, hidden: true }, Date.now()); card.remove(); } }, 'Hide this') : null),
+      !legacyBackedUp ? h('p', { class: 'psmall adm-card-note' }, 'Download the preview backup first. Import unlocks after that.') : !ready ? h('p', { class: 'psmall adm-card-note' }, 'Importing needs a connection to your account. Reconnect, then try again.') : null);
+  };
+  paint(); return card;
+}
+function legacyImportModal(repaintCard) {
+  const L = legacyData(), o = { todos: true, notes: true, events: true, folders: true, boards: true, profile: false, skipSamples: true };
+  const body = h('div', { class: 'pform' }); let busy = false;
+  const names = (list, f) => list.slice(0, 3).map(f).filter(Boolean).join(', ') + (list.length > 3 ? ', …' : '');
+  const draw = () => {
+    const P = legacyPlan(L, o);
+    const row = (k, label, r, f) => h('label', { class: 'adm-check' }, h('input', { type: 'checkbox', checked: o[k], onchange: e => { o[k] = e.target.checked; draw(); } }),
+      h('span', {}, h('b', {}, label), `: ${r.add.length} to add` + (r.skip ? `, ${r.skip} already in your account` : '') + (r.samples ? `, ${r.samples} sample${r.samples === 1 ? '' : 's'} skipped` : ''),
+        r.add.length ? h('small', { class: 'psmall', style: { display: 'block' } }, names(r.add, f)) : null));
+    const samples = (legacyPlan(L, { skipSamples: false }).todos.add.length - legacyPlan(L, { skipSamples: true }).todos.add.length) + (legacyPlan(L, { skipSamples: false }).notes.add.length - legacyPlan(L, { skipSamples: true }).notes.add.length);
+    setKids(body,
+      row('todos', 'Tasks', P.todos, t => t.text), row('notes', 'Notes', P.notes, n => n.title || 'Untitled note'), row('events', 'Calendar events', P.events, e => e.title),
+      h('label', { class: 'adm-check' }, h('input', { type: 'checkbox', checked: o.folders, onchange: e => { o.folders = e.target.checked; draw(); } }),
+        h('span', {}, h('b', {}, 'Folders and links'), `: ${P.folders.add.length} folder${P.folders.add.length === 1 ? '' : 's'} and ${P.items.add.length} link${P.items.add.length === 1 ? '' : 's'} to add` + (P.folders.skip + P.items.skip ? `, ${P.folders.skip + P.items.skip} already in your account` : ''),
+          P.folders.add.length ? h('small', { class: 'psmall', style: { display: 'block' } }, names(P.folders.add, f => f.name)) : null)),
+      row('boards', 'Moodboards', P.boards, b => b.name),
+      P.photo || P.banner ? h('label', { class: 'adm-check' }, h('input', { type: 'checkbox', checked: o.profile, onchange: e => { o.profile = e.target.checked; draw(); } }),
+        h('span', {}, h('b', {}, 'Profile ' + [P.photo ? 'photo' : null, P.banner ? 'banner' : null].filter(Boolean).join(' and ')), ': your account doesn’t have one yet')) : null,
+      samples || !o.skipSamples ? h('label', { class: 'adm-check' }, h('input', { type: 'checkbox', checked: o.skipSamples, onchange: e => { o.skipSamples = e.target.checked; draw(); } }),
+        h('span', {}, 'Skip the sample items CASE! added automatically')) : null,
+      o.boards && P.images ? h('p', { class: 'psmall' }, `${P.images} moodboard image${P.images === 1 ? '' : 's'} will be uploaded to your private storage.`) : null,
+      P.oldImages || P.oldFiles ? h('p', { class: 'psmall' }, `${P.oldImages + P.oldFiles} image${P.oldImages + P.oldFiles === 1 ? '' : 's'} or file${P.oldImages + P.oldFiles === 1 ? '' : 's'} were stored in the Claude version and can’t be brought over. The rest of their items will still be imported.`) : null,
+      h('p', { class: 'psmall adm-card-note' }, 'Not imported: settings and theme, timer lengths, streak, notifications, and admin data. Nothing in your account is changed or removed.'));
+  };
+  draw();
+  openModal({ title: 'Import from this browser', wide: true, content: body, actions: [{ label: 'Cancel', value: null }, { label: 'Import', kind: 'primary', onclick: async close => {
+    if (busy) return; busy = true;
+    const r = await legacyImport(L, o); busy = false;
+    if (r) { close(true); toast(r); repaintCard(); render(); }
+  } }] });
+}
+async function legacyImport(L, o) {
+  if (!(meta.mode === 'cloud' && meta.synced && Cloud.state === 'ok')) { toast('CASE! can’t reach your account right now. Reconnect, then try again.', 'err'); return null; }
+  const gen = meta.gen, P = legacyPlan(L, o), clone = x => JSON.parse(JSON.stringify(x));
+  let added = 0, up = 0, inline = 0;
+  const folderIds = new Set(get('files').folders.map(f => f.id)); if (o.folders) P.folders.add.forEach(f => folderIds.add(f.id));
+  const fix = (x, ...ks) => { ks.forEach(k => { if (x[k] && !folderIds.has(x[k])) x[k] = null; }); return x; };
+  const toStorage = async (obj, dir) => {   // legacy inline picture -> private Storage; stays inline if that fails
+    try { const blob = await (await fetch(obj.data)).blob(); const r = await SbAssets.upload(blob, { type: blob.type, dir }); sbQueueDrop(r.id); obj.asset = r.id; delete obj.data; up++; }
+    catch (e) { inline++; }
+  };
+  toast('Importing…');
+  if (o.boards && P.boards.add.length) {
+    const list = [];
+    for (const b of P.boards.add) {
+      const data = clone(L['board_' + b.id] || { items: [] }); data.items = legacyArr(data.items);
+      for (const it of data.items) if (it.type === 'image' && it.data) await toStorage(it, 'boards');
+      if (gen !== meta.gen) return null;
+      S['board_' + b.id] = data; save('board_' + b.id); list.push(fix(clone(b), 'folderId'));
+    }
+    const bd = get('boards'); list.forEach(b => bd.list.push(b)); save('boards'); added += list.length;
+  }
+  if (gen !== meta.gen) return null;
+  if (o.todos && P.todos.add.length) { const t = get('todos'); P.todos.add.forEach(x => t.push(fix(clone(x), 'folderId', 'folder'))); save('todos'); added += P.todos.add.length; }
+  if (o.notes && P.notes.add.length) { const t = get('notes'); P.notes.add.forEach(x => t.push(fix(clone(x), 'folderId'))); save('notes'); added += P.notes.add.length; }
+  if (o.events && P.events.add.length) { const t = get('events'); P.events.add.forEach(x => t.push(clone(x))); save('events'); added += P.events.add.length; }
+  if (o.folders && (P.folders.add.length || P.items.add.length)) {
+    const f = get('files'); P.folders.add.forEach(x => f.folders.push(fix(clone(x), 'parent'))); P.items.add.forEach(x => f.items.push(fix(clone(x), 'folder')));
+    save('files'); added += P.folders.add.length + P.items.add.length;
+  }
+  if (o.profile && (P.photo || P.banner)) {
+    const lp = L.profile || {}, p = get('profile');
+    if (P.photo && !p.photo) { const x = clone(lp.photo); await toStorage(x, 'profile'); p.photo = x; }
+    if (P.banner && !p.banner) { const x = clone(lp.banner); await toStorage(x, 'profile'); p.banner = x; }
+    if (gen !== meta.gen) return null;
+    save('profile'); paintSide();
+  }
+  lsSet('__import', { at: Date.now(), added }, Date.now());
+  sbPrefetch();
+  return `Imported ${added} item${added === 1 ? '' : 's'}` + (up ? `, with ${up} image${up === 1 ? '' : 's'} moved to your private storage` : '') + (inline ? `. ${inline} image${inline === 1 ? '' : 's'} couldn’t be uploaded and stayed as small copies` : '') + '. Your preview data is still in this browser.';
 }
 /* Sign-in & security text, honest for each mode */
 function securityCopy() {
@@ -3479,7 +3728,9 @@ async function clearAllData() {
   if (!await confirmBox('Delete all CASE! data?', 'This removes every task, note, event, folder, file, and moodboard — permanently, on every device. This cannot be undone.', 'Delete everything')) return;
   Object.keys(have).forEach(k => removeKey(k));
   Object.keys(S).forEach(k => delete S[k]);
-  seed(); toast('All CASE! data cleared.'); go('');
+  seed();
+  if (meta.mode === 'cloud') await sbDeleteAll();
+  toast('All CASE! data cleared.'); go('');
 }
 function exportData() {
   const dump = {}; Object.keys(have).forEach(k => { if (have[k]) dump[k] = S[k]; });
@@ -3795,6 +4046,7 @@ function viewFolders(arg) {
   const upIn = h('input', { type: 'file', multiple: true, hidden: true });
   async function upload(files) {
     let ok = 0;
+    if (meta.mode === 'cloud' && files.length) toast(files.length === 1 ? `Uploading ${files[0].name}…` : `Uploading ${files.length} files…`);
     for (const f of files) {
       try { const r = await uploadAsset(f); get('files').items.push({ id: uid(), folder: pid, kind: 'file', name: f.name, asset: r.id, type: r.contentType, size: r.sizeBytes }); save('files'); ok++; }
       catch (e) { const c = e && e.code; toast(e && e.message === 'bad-type' ? `${f.name}: this type is not supported. Use images, PDF, video, CSV, Markdown, JSON or text.` : c === 'too_large' ? `${f.name} is over the size limit (20 MB).` : c === 'quota_or_state' ? 'Storage is full. Delete a file to add more.' : `Could not upload ${f.name}.`, 'err'); }
@@ -3893,8 +4145,9 @@ function viewFolders(arg) {
       ...items.map(i => {
         const isLink = i.kind === 'link', href = isLink ? i.url : assetUrl(i.asset), isImg = !isLink && /^image\//.test(i.type || ''), key = 'file:' + i.id;
         let host = ''; if (isLink) { try { host = new URL(i.url).hostname.replace(/^www\./, ''); } catch (e) { } }
-        const a = wrapClick(key, h('a', { class: 'ftile big item', href, title: i.name || i.url || '', target: '_blank', rel: 'noopener noreferrer', draggable: 'true', ondragstart: e => dragSetPayload(e, 'file', i.id) }, cb(key), h('span', { class: 'fico thumb' }, isImg ? h('img', { src: href, alt: '', loading: 'lazy' }) : ic(isLink ? 'link' : fileKind(i.type), 34)), h('span', { class: 'fname' }, i.name), h('span', { class: 'fmeta' }, isLink ? host : fmtSize(i.size || 0))));
-        return tile(a, [kebabMenu([{ icon: 'edit', label: 'Rename', fn: async () => { const v = await askText({ title: 'Rename', label: 'Name', value: i.name }); if (v) { const c = get('files').items.find(x => x.id === i.id); if (c) { c.name = v; save('files'); rerender(); } } } }, { icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('file', i.id, i.folder) }, '-', { icon: 'trash', label: 'Delete', danger: true, fn: async () => { if (await confirmBox('Delete this item?', `"${i.name}" will be removed.`)) { if (i.asset) dropAsset(i.asset); S.files = { folders: get('files').folders, items: get('files').items.filter(x => x.id !== i.id) }; save('files'); rerender(); } } }])]);
+        const a = wrapClick(key, h('a', { class: 'ftile big item', href, title: i.name || i.url || '', target: '_blank', rel: 'noopener noreferrer', draggable: 'true', ondragstart: e => dragSetPayload(e, 'file', i.id) }, cb(key), h('span', { class: 'fico thumb' }, isImg ? h('img', { src: href, alt: '', loading: 'lazy' }) : ic(isLink ? 'link' : fileKind(i.type), 34)), h('span', { class: 'fname' }, i.name), h('span', { class: 'fmeta' }, isLink ? host : fileTypeLabel(i.type) + ' · ' + fmtSize(i.size || 0))));
+        if (isSb(i.asset)) a.addEventListener('click', e => { if (folderSelMode) return; e.preventDefault(); sbOpen(i.asset, i.name); });
+        return tile(a, [kebabMenu([{ icon: 'edit', label: 'Rename', fn: async () => { const v = await askText({ title: 'Rename', label: 'Name', value: i.name }); if (v) { const c = get('files').items.find(x => x.id === i.id); if (c) { c.name = v; save('files'); rerender(); } } } }, { icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('file', i.id, i.folder) }, ...(isSb(i.asset) ? [{ icon: 'download', label: 'Download', fn: () => sbOpen(i.asset, i.name, true) }] : []), '-', { icon: 'trash', label: 'Delete', danger: true, fn: async () => { if (await confirmBox('Delete this item?', `"${i.name}" will be removed.`)) { if (i.asset) dropAsset(i.asset); S.files = { folders: get('files').folders, items: get('files').items.filter(x => x.id !== i.id) }; save('files'); rerender(); } } }])]);
       }),
       ...noteItems.map(n => { const key = 'note:' + n.id; const a = wrapClick(key, h('a', { class: 'ftile big item', href: '#/notes/' + n.id, title: n.title || 'Untitled', draggable: 'true', ondragstart: e => dragSetPayload(e, 'note', n.id) }, cb(key), h('span', { class: 'fico thumb' }, ic('notes', 30)), h('span', { class: 'fname' }, n.title || 'Untitled note'), h('span', { class: 'fmeta' }, 'Note · ', ago(n.updated)))); return tile(a, [kebabMenu([{ icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('note', n.id, n.folderId) }])]); }),
       ...boardItems.map(bd => { const key = 'board:' + bd.id; const a = wrapClick(key, h('a', { class: 'ftile big item', href: '#/moodboard/' + bd.id, title: bd.name, draggable: 'true', ondragstart: e => dragSetPayload(e, 'board', bd.id) }, cb(key), h('span', { class: 'fico thumb' }, ic('board', 30)), h('span', { class: 'fname' }, bd.name), h('span', { class: 'fmeta' }, 'Moodboard'))); return tile(a, [kebabMenu([{ icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('board', bd.id, bd.folderId) }])]); })
@@ -5034,8 +5287,7 @@ async function boot() {
   if (real) await Promise.race([roleKnown, new Promise(r => setTimeout(r, 5000))]);
   window.addEventListener('beforeunload', flushAll);
   document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
-  if (real) {                                  // Supabase: real sign-in + cloud sync
-    meta.assets = null;
+  if (real) {                                  // Supabase: real sign-in + cloud sync (+ Storage while signed in)
     finishAuthCallback(cb);
     cloudListeners();
     const shared = sharedLoad(true);

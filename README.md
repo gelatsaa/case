@@ -2,14 +2,15 @@
 
 A personal productivity and organizing web app: dashboard, to-do, calendar, notes, folders, moodboards, timer, ambience, themes, and settings.
 
-## Current status: Phase 4, Batch 2 (Supabase cloud sync)
+## Current status: Phase 4, Batch 4 (private file storage + legacy import)
 
 - Single-file vanilla HTML/CSS/JavaScript app (`index.html`). No framework, no build step.
-- **Sign-in:** real Supabase Auth (email + password, confirmation and reset emails). Preview mode returns only if the Supabase settings in `AUTH_CONFIG` are emptied.
-- **Admin roles:** from the `profiles` table, protected by Row Level Security.
-- **Data:** synced to Supabase (`user_data` table, one row per data key per person). Each browser also keeps an offline copy per account. Newest save wins per key.
-- **Not yet:** images/files in Supabase Storage, site-wide admin data, importing old preview data (`case:v1:` is left untouched).
-- Database setup, run once each in the Supabase SQL Editor, in order: `supabase/schema.sql` (Batch 1), then `supabase/batch2-user-data.sql` (Batch 2). Neither contains keys.
+- **Sign-in:** real Supabase Auth (email + password). Google/Apple sign-in not yet enabled.
+- **Data:** synced to Supabase (`user_data`), with an offline copy per account in each browser.
+- **Files & images:** private Supabase Storage bucket `case-user-files`, one folder per account, readable only by its owner through short-lived signed links. 20 MB per file; images, PDF, video, CSV, Markdown, JSON, text (no SVG). Folders supports upload, drag-and-drop, open, download, and delete. Removed files are cleaned up the next time CASE! opens, only if nothing still uses them.
+- **Legacy import:** Settings → Privacy & data offers an opt-in, additive import of old preview (`case:v1:`) data, after a backup. The old data is never changed.
+- **Admin:** roles, announcements, releases, maintenance — server-enforced (RLS + admin-only functions).
+- Database setup, run once each in the Supabase SQL Editor, in order: `schema.sql`, `batch2-user-data.sql`, `batch3-admin.sql`, `batch3b-releases.sql`, `batch4-storage.sql`. None contain keys.
 
 ## Running it
 
