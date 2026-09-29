@@ -1769,6 +1769,8 @@ body[data-page="admin"] .page .adm-stat.off{ border-style:dashed; border-color:v
 .adm-ver{ font-size:12px; font-weight:800; padding:2px 9px; border-radius:var(--r-pill); border:1.5px solid var(--line2); background:var(--card); color:var(--ink2); }
 .adm-ann-t{ font-size:17px; margin:0 0 4px; overflow-wrap:anywhere; }
 .adm-ann-m{ margin:0; color:var(--ink2); font-size:14px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+.adm-ann-m.clip{ display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; cursor:pointer; }
+.adm-ann-pv{ border:1.5px dashed var(--line); border-radius:12px; padding:4px; font-weight:400; }
 .adm-ann-acts{ margin-top:12px; }
 body[data-page="admin"] .page .adm-ann[data-state="archived"]{ box-shadow:none; border-style:dashed; }
 .adm-err{ color:var(--red-d); font-size:13px; font-weight:700; margin:0; min-height:0; }
@@ -5144,7 +5146,7 @@ function admOverview(redraw) {
     const drafts = n('draft');
     tiles = [
       tile('Current version', rel ? verLabel(rel.version) : 'None set', rel ? 'Released ' + shortDate(rel.date) + (rel.published ? '' : ', hidden') : 'Add one in Releases'),
-      tile('Live announcements', String(n('published')), [drafts + (drafts === 1 ? ' draft' : ' drafts'), n('scheduled') ? n('scheduled') + ' scheduled' : null].filter(Boolean).join(', ')),
+      tile('Live announcements', String(n('published')), [drafts + (drafts === 1 ? ' draft' : ' drafts'), n('scheduled') + ' scheduled', n('archived') + ' archived'].join(', ')),
       tile('Total users', v('total_users'), sub(s ? `${s.confirmed_users} confirmed, ${s.admins} ${+s.admins === 1 ? 'admin' : 'admins'}` : ''), !s),
       tile('New this week', v('new_7d'), sub(s ? `${s.new_30d} in the last 30 days` : ''), !s),
       tile('Signed in (7 days)', v('signed_in_7d'), sub('Logged in with email and password'), !s),
@@ -5306,7 +5308,7 @@ function admAnnouncements(redraw) {
   const ad = admList(), list = ad.announcements.slice().sort((a, b) => b.updated - a.updated);
   const n = st => list.filter(a => annState(a) === st).length;
   const seg = h('div', { class: 'seg wrap', role: 'group', 'aria-label': 'Filter announcements' },
-    [['all', 'All', list.length], ...Object.keys(ANN_STATES).map(k => [k, ANN_STATES[k], n(k)])].map(([id, l, c]) =>
+    [['all', 'All', list.length], ...(admCloud() ? ['published', 'scheduled', 'draft', 'archived'] : Object.keys(ANN_STATES)).map(k => [k, admCloud() && k === 'draft' ? 'Drafts' : ANN_STATES[k], n(k)])].map(([id, l, c]) =>
       h('button', { type: 'button', 'aria-pressed': String(admAnnFilter === id), onclick: () => { admAnnFilter = id; redraw(); } }, l, ' ', h('b', {}, c))));
   const shown = admAnnFilter === 'all' ? list : list.filter(a => annState(a) === admAnnFilter);
   const b = (label, icon, onclick, kind) => h('button', { class: 'btn sm' + (kind ? ' ' + kind : ''), type: 'button', onclick }, icon ? ic(icon, 15) : null, label);
@@ -5328,7 +5330,10 @@ function admAnnouncements(redraw) {
     }, 'danger'));
     return h('article', { class: 'card adm-ann', 'data-state': st, 'data-id': a.id },
       h('div', { class: 'adm-ann-top' }, h('span', { class: 'adm-pill ' + st }, ANN_STATES[st]), a.version ? h('span', { class: 'adm-ver' }, verLabel(a.version)) : null, h('span', { class: 'adm-when' }, annWhen(a))),
-      h('h3', { class: 'adm-ann-t' }, a.title), h('p', { class: 'adm-ann-m' }, a.message),
+      h('h3', { class: 'adm-ann-t' }, a.title),
+      admCloud() ? h('p', { class: 'adm-ann-m clip', tabindex: '0', title: 'Show the whole message', 'aria-expanded': 'false',
+        onclick: e => { const el = e.currentTarget, open = el.classList.toggle('clip'); el.setAttribute('aria-expanded', String(!open)); },
+        onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click(); } } }, a.message) : h('p', { class: 'adm-ann-m' }, a.message),
       admCloud() && a.created ? h('p', { class: 'psmall adm-card-note' }, 'Created ' + fmtDT(a.created) + (a.updated && a.updated !== a.created ? ', updated ' + fmtDT(a.updated) : '')) : null,
       h('div', { class: 'prow adm-ann-acts' }, acts));
   };
@@ -5353,6 +5358,12 @@ function announcementModal(existing, redraw) {
   const when = h('input', { class: 'field', type: 'datetime-local', 'aria-label': 'Publish date and time', value: a.publishAt && !isLive ? toLocalInput(a.publishAt) : toLocalInput(Date.now() + 86400000) });
   const whenWrap = h('label', { class: 'flabel' }, 'Goes live at', when);
   const err = h('p', { class: 'adm-err', role: 'alert' });
+  /* preview: exactly how the notification will read (same markup as the Notifications panel) */
+  const pvT = h('strong'), pvB = h('p');
+  const preview = admCloud() ? h('div', { class: 'flabel' }, h('span', {}, 'Preview in Notifications'),
+    h('div', { class: 'notiflist adm-ann-pv', 'aria-live': 'polite' }, h('div', { class: 'notifrow unread' }, pvT, pvB, h('span', { class: 'nwhen' }, 'just now')))) : null;
+  const paintPv = () => { const v = normVer(ver.value); pvT.textContent = title.value.trim() || 'Your title'; pvB.textContent = (v ? 'CASE! ' + verLabel(v) + ': ' : '') + (msg.value.trim() || 'Your message'); };
+  if (preview) { paintPv(); [title, msg, ver].forEach(el => el.addEventListener('input', paintPv)); }
   const seg = h('div', { class: 'seg wrap adm-seg', role: 'group', 'aria-label': 'When to publish' });
   const paintSeg = () => { setKids(seg, [['draft', 'Draft'], ['now', 'Publish now'], ['schedule', 'Schedule']].map(([id, l]) =>
     h('button', { type: 'button', 'aria-pressed': String(mode === id), onclick: () => { mode = id; paintSeg(); } }, l))); whenWrap.hidden = mode !== 'schedule'; };
@@ -5398,7 +5409,7 @@ function announcementModal(existing, redraw) {
     content: h('div', { class: 'pform' }, h('label', { class: 'flabel' }, 'Title', title), h('label', { class: 'flabel' }, 'Message', msg),
       h('label', { class: 'flabel' }, 'Release (optional)', ver, dl),
       isLive ? h('p', { class: 'psmall' }, 'This announcement is already published. Changes show right away in the list; a notification that was already delivered keeps its original text.')
-        : h('div', { class: 'flabel' }, h('span', {}, 'Publishing'), seg), isLive ? null : whenWrap, err),
+        : h('div', { class: 'flabel' }, h('span', {}, 'Publishing'), seg), isLive ? null : whenWrap, preview, err),
     actions: [{ label: 'Cancel', value: null }, { label: 'Save', kind: 'primary', onclick: submit }] });
 }
 
