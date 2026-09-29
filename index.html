@@ -3686,8 +3686,8 @@ function securityCopy() {
   if (meta.mode === 'db') return h('p', { class: 'psmall' }, 'CASE! doesn\u2019t have its own password — signing in is handled by your Claude account, so password changes and active-session management happen there, not here.');
   if (Auth.isPreview()) return h('p', { class: 'psmall' }, 'This is a preview sign-in: CASE! doesn\u2019t check or store a password yet. Real accounts and password changes arrive with Supabase.');
   const email = Auth.session && Auth.session.user.email;
-  return [h('p', { class: 'psmall' }, 'You sign in to CASE! with your email and password. To change your password, we\u2019ll email you a secure link.'),
-    h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', disabled: !email, onclick: async () => {
+  return [h('p', { class: 'psmall' }, 'You sign in to CASE! with your email and password. Change it here, or if you\u2019ve forgotten it, we\u2019ll email you a secure link.'),
+    h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', disabled: !email, onclick: changePasswordModal }, 'Change password'), h('button', { class: 'btn', type: 'button', disabled: !email, onclick: async () => {
       const r = await Auth.resetPassword(email); toast(r.error ? r.error.message : 'Reset link sent to ' + email + '. Open it in this browser.', r.error ? 'err' : undefined); } }, 'Email me a reset link'))];
 }
 function accountSection() {
@@ -3702,7 +3702,9 @@ function accountSection() {
       h('div', { class: 'kv' }, h('span', {}, 'Status'), h('span', {}, Auth.isPreview() ? 'Preview session (no real account)' : 'Signed in')),
       h('div', { class: 'kv' }, h('span', {}, 'Signed in as'), h('span', {}, (Auth.session && Auth.session.user.email) || '—')),
       Auth.isPreview() ? h('p', { class: 'psmall', style: { margin: '10px 0 12px' } }, 'Real accounts aren’t connected yet. Signing out returns you to the welcome page but doesn’t lock your data: anyone using this browser can sign in again and see it.') : null,
-      h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', onclick: signOutFlow }, ic('logout', 16), 'Sign out'))),
+      Auth.isPreview() ? null : h('p', { class: 'psmall', style: { margin: '10px 0 12px' } }, 'Sign out signs out this device only. On a shared or lost device, use Sign out of all devices.'),
+      h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', onclick: signOutFlow }, ic('logout', 16), 'Sign out'),
+        Auth.isPreview() ? null : h('button', { class: 'btn', type: 'button', onclick: signOutAllFlow }, ic('logout', 16), 'Sign out of all devices'))),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Export & delete'),
       h('p', { class: 'psmall' }, meta.mode === 'db' ? 'Deleting your Claude account itself is done from claude.ai account settings, not here. This clears only what CASE! has stored.'
         : Auth.isPreview() ? 'This clears only what CASE! has stored in this browser.' : 'This clears everything CASE! has stored for your account, on every device. Deleting the account itself isn\u2019t available in the app yet.'),
@@ -4589,7 +4591,9 @@ const PreviewAuth = {
   async resetPasswordForEmail() { return { data: null, error: { code: 'preview', message: 'Password reset emails need Supabase, which isn’t connected yet. No email was sent.' } }; },
   async signInWithOAuth({ provider }) { return { data: null, error: { code: 'not_configured', message: `${provider} sign-in isn’t connected yet.` } }; },
   async signOut() { this._write(null); return { error: null }; },
-  async updatePassword() { return { data: null, error: { code: 'preview', message: 'Password changes need real accounts, which aren’t connected in this preview.' } }; }
+  async updatePassword() { return { data: null, error: { code: 'preview', message: 'Password changes need real accounts, which aren’t connected in this preview.' } }; },
+  async resendSignup() { return { data: null, error: { code: 'preview', message: 'Confirmation emails need real accounts, which aren’t connected in this preview.' } }; },
+  async verifyPassword() { return { data: null, error: { code: 'preview', message: 'Password changes need real accounts, which aren’t connected in this preview.' } }; }
 };
 
 /* ---- Real sign-in through Supabase Auth (used only when AUTH_CONFIG.mode === 'supabase') ----
@@ -4650,12 +4654,16 @@ const SupabaseAuth = {
     if (!p || !p.enabled) return { data: null, error: { code: 'not_configured', message: `${p ? p.label : provider} sign-in isn’t connected yet.` } };
     return this._run(a => a.signInWithOAuth({ provider, options: { redirectTo: authRedirect('oauth') } }));
   },
-  async signOut() {
+  /* scope: 'local' = this device only (the default for "Sign out"), 'global' = every device,
+     'others' = every device except this one. Supabase's own default is 'global'. */
+  async signOut(scope = 'local') {
     if (!this.client) return { error: null };
-    const r = await this._run(a => a.signOut());
-    if (r.error) { try { await this.client.auth.signOut({ scope: 'local' }); } catch (e) { } }   // always forget the session on this device
-    return { error: null };
-  }
+    const r = await this._run(a => a.signOut({ scope }));
+    if (scope === 'local') { if (r.error) { try { await this.client.auth.signOut({ scope: 'local' }); } catch (e) { } } return { error: null }; }   // always forget this device
+    return { error: r.error };   // 'global' / 'others': report failures (nothing changes if the server wasn't reached)
+  },
+  resendSignup(email) { return this._run(a => a.resend({ type: 'signup', email, options: { emailRedirectTo: authRedirect('confirmed') } })); },
+  verifyPassword(email, password) { return this._run(a => a.signInWithPassword({ email, password })); }
 };
 
 const Auth = {
@@ -4666,6 +4674,8 @@ const Auth = {
     /* Supabase: sign-in/out in another tab, token refreshes, and password-recovery links */
     if (this.adapter.onAuthStateChange) this.adapter.onAuthStateChange((event, sess) => {
       if (event === 'PASSWORD_RECOVERY') this.recovery = true;
+      /* signed out without this tab asking: another tab, another device ("all devices"), or expiry */
+      if (event === 'SIGNED_OUT' && this.session && !this._localSignOut) this.endedElsewhere = true;
       this._set(sess || null);
       if (event === 'PASSWORD_RECOVERY' && meta.booted) go('reset-password');
     });
@@ -4684,7 +4694,29 @@ const Auth = {
   async updatePassword(password) { const r = await this.adapter.updatePassword(password); if (!r.error) this.recovery = false; return r; },
   async resetPassword(email) { return this.adapter.resetPasswordForEmail(email); },
   async signInWithProvider(provider) { return this.adapter.signInWithOAuth({ provider }); },
-  async signOut() { const r = await this.adapter.signOut(); this.recovery = false; this._set(null); return r; }
+  async signOut(scope = 'local') {
+    this._localSignOut = true;
+    try {
+      const r = await this.adapter.signOut(scope);
+      if (r && r.error) return r;                         // 'global' failed: still signed in here, nothing changed
+      this.recovery = false; this._set(null); return { error: null };
+    } finally { this._localSignOut = false; }
+  },
+  async signOutOthers() { return this.adapter.signOut('others'); },
+  async resendConfirmation(email) { return this.adapter.resendSignup(email); },
+  /* change password while signed in: re-check the current password first (someone at an unlocked
+     device can't change it), then set the new one; optionally sign out every other device */
+  async changePassword(current, next, others) {
+    const email = this.session && this.session.user && this.session.user.email;
+    if (!email) return { error: { message: 'Please sign in again first.' } };
+    const v = await this.adapter.verifyPassword(email, current);
+    if (v.error) return { error: { message: /don’t match/.test(v.error.message) ? 'Your current password isn’t right.' : v.error.message } };
+    if (v.data && v.data.session) this._set(v.data.session);
+    const r = await this.adapter.updatePassword(next);
+    if (r.error) return r;
+    if (others) { const o = await this.adapter.signOut('others'); if (o && o.error) return { error: null, othersFailed: true }; }
+    return { error: null };
+  }
 };
 /* Supabase mode: switch the app's data to the account that just signed in (or clear it on sign
    out). Registered first, so data is in place before the role check and the re-render below. */
@@ -4758,8 +4790,14 @@ const Access = {
 Auth.onChange(() => Access.refresh());
 /* Signing out (here or in another tab) leaves the private app. Signing in navigates on its own. */
 Auth.onChange(sess => {
+  const ended = !sess && Auth.endedElsewhere; Auth.endedElsewhere = false;
   if (!sess) clearNext();
   if (!meta.booted) return;
+  if (!sess && ended) {                                 // not this tab's doing: say so, and offer to sign straight back in
+    if (!PUBLIC_PAGES.has(route.page)) rememberNext(location.hash);
+    toast('You’ve been signed out. This happens after signing out in another tab or on all devices, or when a session expires. Anything not yet synced stays on this device and syncs when you sign back in.');
+    go('signin'); return;
+  }
   if (!sess) { if (PUBLIC_PAGES.has(route.page)) render(); else go('welcome'); }
   else if (route.page === 'welcome') render();
 });
@@ -4776,11 +4814,59 @@ function stampHistory() { try { if (!(history.state && history.state[HIST_STAMP]
 function cameViaHistory() { try { return !!(history.state && history.state[HIST_STAMP]); } catch (e) { return false; } }
 
 async function signOutFlow() {
-  const ok = await new Promise(res => openModal({ title: 'Sign out of CASE!?', content: h('p', { class: 'mtext' }, Auth.isPreview() ? 'You’ll return to the welcome page. In this preview, your CASE! data stays saved in this browser and reappears when you sign in again.' : 'You’ll return to the welcome page. Your CASE! data stays safe in your account and is there when you sign in again, on any device.'),
+  const ok = await new Promise(res => openModal({ title: 'Sign out of CASE!?', content: h('p', { class: 'mtext' }, Auth.isPreview() ? 'You’ll return to the welcome page. In this preview, your CASE! data stays saved in this browser and reappears when you sign in again.' : 'You’ll return to the welcome page. This signs out this device only; your other devices stay signed in. Your CASE! data stays safe in your account.'),
     actions: [{ label: 'Cancel', value: false }, { label: 'Sign out', kind: 'primary', value: true }], onClose: v => res(v === true) }));
   if (!ok) return;
   if (meta.mode === 'cloud') await cloudDrain(3000);
   await Auth.signOut(); toast('Signed out.');
+}
+
+async function signOutAllFlow() {
+  const ok = await new Promise(res => openModal({ title: 'Sign out of all devices?', content: h('p', { class: 'mtext' }, 'You’ll be signed out here and on every other device where you use CASE!. Other devices are signed out the next time they check in, within about an hour. Anything not yet synced on them stays there and syncs when you sign back in.'),
+    actions: [{ label: 'Cancel', value: false }, { label: 'Sign out everywhere', kind: 'primary', value: true }], onClose: v => res(v === true) }));
+  if (!ok) return;
+  if (meta.mode === 'cloud') await cloudDrain(3000);
+  const r = await Auth.signOut('global');
+  if (r && r.error) { toast('CASE! couldn’t reach your account, so nothing was signed out. Check your connection and try again.', 'err'); return; }
+  toast('Signed out of all devices.');
+}
+/* "Resend" with a 60-second wait between sends (Supabase limits how often these emails go out) */
+function resendButton(getEmail, label = 'Resend confirmation email') {
+  let wait = 0, iv = null;
+  const b = h('button', { class: 'btn sm', type: 'button' }, label);
+  const tickLabel = () => { b.textContent = wait > 0 ? `Resend in ${wait}s` : label; b.disabled = wait > 0; };
+  b.addEventListener('click', async () => {
+    const em = getEmail(); if (!EMAIL_RE.test(em || '')) { toast('Enter your email address first.', 'err'); return; }
+    b.disabled = true;
+    const r = await Auth.resendConfirmation(em);
+    if (r.error && !/security purposes|too many|rate limit|wait/i.test(r.error.message || '')) { b.disabled = false; toast(r.error.message, 'err'); return; }
+    toast(r.error ? r.error.message : 'If that account still needs confirming, a new link is on its way to ' + em + '. Open it in this browser.', r.error ? 'err' : undefined);
+    wait = 60; tickLabel(); clearInterval(iv); iv = setInterval(() => { wait--; if (!b.isConnected || wait <= 0) { clearInterval(iv); wait = 0; } tickLabel(); }, 1000);
+  });
+  return b;
+}
+function changePasswordModal() {
+  const f = (label, name, ac) => { const i = h('input', { class: 'field', type: 'password', name, autocomplete: ac, required: true }); return [h('label', { class: 'flabel' }, label, i), i]; };
+  const [curL, cur] = f('Current password', 'current-password', 'current-password');
+  const [newL, nw] = f('New password', 'new-password', 'new-password');
+  const [conL, con] = f('Confirm new password', 'confirm-password', 'new-password');
+  const others = h('input', { type: 'checkbox', checked: true });
+  const err = h('p', { class: 'adm-err', role: 'alert' }); let busy = false;
+  openModal({ title: 'Change password', content: h('div', { class: 'pform' }, curL, newL, h('p', { class: 'psmall', style: { marginTop: '-6px' } }, 'At least 8 characters.'), conL,
+      h('label', { class: 'adm-check' }, others, 'Also sign out my other devices'), err),
+    actions: [{ label: 'Cancel', value: null }, { label: 'Change password', kind: 'primary', onclick: async close => {
+      err.textContent = '';
+      if (busy) return;
+      if (!cur.value) { err.textContent = 'Enter your current password.'; cur.focus(); return; }
+      if (nw.value.length < 8) { err.textContent = 'Use at least 8 characters for your new password.'; nw.focus(); return; }
+      if (nw.value !== con.value) { err.textContent = 'The two new passwords don’t match.'; con.focus(); return; }
+      if (nw.value === cur.value) { err.textContent = 'Choose a password that’s different from your current one.'; nw.focus(); return; }
+      busy = true; const r = await Auth.changePassword(cur.value, nw.value, others.checked); busy = false;
+      if (r.error) { err.textContent = r.error.message; return; }
+      cur.value = nw.value = con.value = ''; close(true);
+      toast(r.othersFailed ? 'Password changed. CASE! couldn’t sign out your other devices right now; try “Sign out of all devices” later.' : others.checked ? 'Password changed. Your other devices will be signed out.' : 'Password changed.');
+    } }] });
+  setTimeout(() => cur.focus(), 50);
 }
 
 /* ================= public views ================= */
@@ -5090,13 +5176,14 @@ function viewSignIn() {
     if (!EMAIL_RE.test(em)) { err.textContent = 'Enter an email address like name@example.com.'; $('input', email).focus(); return; }
     if (!pi.value) { err.textContent = 'Enter your password.'; pi.focus(); return; }
     const r = await Auth.signIn(em, pi.value); pi.value = '';
-    if (r.error) { err.textContent = r.error.message; return; }
+    if (r.error) { err.textContent = r.error.message; resendRow.style.display = /confirm your email/i.test(r.error.message) ? '' : 'none'; return; }
     toast(Auth.isPreview() ? 'Signed in (preview).' : 'Signed in.'); finishSignIn();
   };
+  const resendRow = h('div', { class: 'auth-row', style: { display: 'none' } }, resendButton(() => $('input', email).value.trim()));   // shown only for unconfirmed accounts
   const form = h('form', { class: 'auth-form', novalidate: true, onsubmit: onSubmit },
     email, pw,
     h('div', { class: 'auth-row' }, h('span'), h('a', { href: '#/forgot-password' }, 'Forgot password?')),
-    err, h('button', { class: 'btn primary wide lg pop', type: 'submit', onclick: onSubmit }, 'Sign in'));
+    err, resendRow, h('button', { class: 'btn primary wide lg pop', type: 'submit', onclick: onSubmit }, 'Sign in'));
   return authShell('Welcome back', 'Sign in to open your CASE! dashboard.', [
     previewNote('Real accounts aren’t connected yet, so your password isn’t checked or saved. Signing in opens the CASE! data stored in this browser.'),
     AUTH_CONFIG.mode === 'supabase' && Shared.status && Shared.status.maintenance ? h('p', { class: 'auth-note', role: 'note' }, h('strong', {}, 'Maintenance. '),
@@ -5122,8 +5209,9 @@ function viewSignUp() {
     const r = await Auth.signUp(em, a.value); a.value = ''; b.value = '';
     if (r.error) { err.textContent = r.error.message; return; }
     if (!Auth.isPreview() && !(r.data && r.data.session)) {   // Supabase: email confirmation required
-      form.replaceWith(h('div', { class: 'auth-done', role: 'status' }, 'Check your email. We sent a confirmation link to ', h('strong', {}, em),
-        '. Open it in this same browser to finish creating your account.'));
+      form.replaceWith(h('div', {}, h('div', { class: 'auth-done', role: 'status' }, 'Check your email. We sent a confirmation link to ', h('strong', {}, em),
+        '. Open it in this same browser to finish creating your account.'),
+        h('p', { class: 'auth-alt', style: { marginTop: '14px' } }, 'Didn’t get it? Check spam, or ', resendButton(() => em, 'Resend email'))));
       return;
     }
     toast(Auth.isPreview() ? 'Preview session started. No account was created.' : 'Account created. Welcome to CASE!'); finishSignIn(true);

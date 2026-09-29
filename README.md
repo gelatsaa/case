@@ -5,7 +5,7 @@ A personal productivity and organizing web app: dashboard, to-do, calendar, note
 ## Current status: Phase 4, Batch 4 (private file storage + legacy import)
 
 - Single-file vanilla HTML/CSS/JavaScript app (`index.html`). No framework, no build step.
-- **Sign-in:** real Supabase Auth (email + password). Google/Apple sign-in not yet enabled.
+- **Sign-in:** real Supabase Auth (email + password): sign up with email confirmation (and resend), sign in, reset password, change password in Settings, sign out on this device or on all devices. Google/Apple sign-in not yet enabled.
 - **Data:** synced to Supabase (`user_data`), with an offline copy per account in each browser.
 - **Files & images:** private Supabase Storage bucket `case-user-files`, one folder per account, readable only by its owner through short-lived signed links. 20 MB per file; images, PDF, video, CSV, Markdown, JSON, text (no SVG). Folders supports upload, drag-and-drop, open, download, and delete. Removed files are cleaned up the next time CASE! opens, only if nothing still uses them.
 - **Legacy import:** Settings → Privacy & data offers an opt-in, additive import of old preview (`case:v1:`) data, after a backup. The old data is never changed.
