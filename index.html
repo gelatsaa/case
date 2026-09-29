@@ -1745,6 +1745,21 @@ body[data-page="admin"] .page .adm-stat.off{ border-style:dashed; border-color:v
 .adm-table td:first-child{ min-width:170px; }
 .adm-table small{ display:block; color:var(--ink3); font-size:12px; font-weight:600; }
 .adm-acts{ display:flex; gap:6px; flex-wrap:wrap; }
+/* Admin → Users on phones: each account becomes a stacked block (no sideways swiping) */
+@media (max-width:640px){
+  .adm-table.adm-users{ min-width:0; }
+  .adm-table.adm-users thead{ display:none; }
+  .adm-table.adm-users, .adm-table.adm-users tbody, .adm-table.adm-users tr, .adm-table.adm-users td{ display:block; }
+  .adm-table.adm-users tr{ padding:12px 14px; border-bottom:1px dashed var(--line); }
+  .adm-table.adm-users tr:last-child{ border-bottom:none; }
+  .adm-table.adm-users tr[hidden]{ display:none; }
+  .adm-table.adm-users td, .adm-table.adm-users td:not(:first-child), .adm-table.adm-users td:first-child{ padding:3px 0; border-bottom:none; white-space:normal; min-width:0; }
+  .adm-table.adm-users td[data-label]{ display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .adm-table.adm-users td[data-label]::before{ content:attr(data-label); font-size:12px; font-weight:800; color:var(--ink3); }
+  .adm-table.adm-users td:first-child{ padding-bottom:6px; }
+  .adm-table.adm-users td:last-child{ padding-top:8px; }
+  .adm-table.adm-users .adm-acts{ flex-wrap:wrap; }
+}
 .adm-steps{ margin:8px 0 0; padding-left:20px; color:var(--ink2); font-size:13.5px; line-height:1.6; }
 
 /* announcements */
@@ -2031,13 +2046,14 @@ function useAccountData(sess) {
   meta.acctReady = true;
   meta.gen = (meta.gen || 0) + 1;                     // invalidates anything still in flight
   Object.keys(timers).forEach(k => clearTimeout(timers[k])); clearTimeout(Cloud.retryTimer);
-  [S, T, have, dirty, writing, timers, chain, recent, base].forEach(clearObj);
+  [S, T, have, dirty, writing, timers, chain, recent, base].forEach(clearObj); sharedReset();
   Cloud.state = 'connecting'; Cloud.fails = 0; Cloud.pulling = null; Cloud.lastPull = 0;
   LS = prefix; meta.uid = id; meta.synced = false; meta.loadFailed = false;
   meta.mode = id ? 'cloud' : 'local';
   if (prefix) loadLocal();                            // this account's offline copy (never seeded here)
   if (meta.booted) {
     if (id) cloudSync(true);                          // start the download first: a display hiccup below must never block syncing
+    sharedLoad();
     try { applyTheme(); tmSet(TM.mode); refreshNotifs(); paintNotifBadge(); paintStreak(); paintStatus(); } catch (e) { console.error('[CASE!] repaint after account switch', e); }
   }
 }
@@ -2195,6 +2211,76 @@ function cloudListeners() {
   window.addEventListener('focus', cloudTick);
   window.addEventListener('online', () => { if (cloudOn()) { Cloud.fails = 0; cloudRetry(); } });
   window.addEventListener('offline', () => { if (cloudOn()) { Cloud.state = 'offline'; paintStatus(); } });
+  /* shared admin content: same moments as the sync checks (focus, about once a minute) */
+  setInterval(sharedTick, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) sharedTick(); });
+  window.addEventListener('focus', sharedTick);
+}
+/* ================= Shared admin content (Batch 3) =================
+   Announcements, releases, and the maintenance/notice status live in shared Supabase tables.
+   What each person gets is decided by the SERVER (RLS): admins read everything, signed-in
+   people only live announcements and published releases, everyone the public status.
+   Kept in memory only; separate from the Batch 2 per-person sync. */
+const Shared = { ann: [], rel: [], status: null, loaded: false, statusLoaded: false, loading: null, last: 0,
+  stats: null, statsErr: false, statsLoading: false, users: null, usersErr: false, usersLoading: false };
+function sharedOn() { return AUTH_CONFIG.mode === 'supabase' && typeof SupabaseAuth !== 'undefined' && !!SupabaseAuth.client; }
+const tsMs = v => v ? new Date(v).getTime() : null;
+function mapAnn(r) { return { id: r.id, title: r.title, message: r.message, version: r.version || '', status: r.status, publishAt: tsMs(r.publish_at), publishedAt: tsMs(r.published_at), archivedAt: tsMs(r.archived_at), created: tsMs(r.created_at), updated: tsMs(r.updated_at) }; }
+function mapRel(r) { return { id: r.id, version: r.version, date: r.release_date, notes: r.notes || '', current: !!r.is_current, published: !!r.published, created: tsMs(r.created_at), updated: tsMs(r.updated_at) }; }
+function sharedReset() { Object.assign(Shared, { ann: [], rel: [], loaded: false, loading: null, stats: null, statsErr: false, users: null, usersErr: false }); }
+/* quiet = the caller redraws itself (admin actions) */
+function sharedLoad(quiet) {
+  if (!sharedOn()) return Promise.resolve(false);
+  if (Shared.loading) return Shared.loading;
+  const gen = meta.gen, c = SupabaseAuth.client, signed = Auth.isSignedIn();
+  const run = (async () => {
+    try {
+      const st = await c.rpc('get_app_status');
+      if (st.error) throw st.error;
+      let ann = [], rel = [];
+      if (signed) {
+        const [a, r] = await Promise.all([c.from('announcements').select('*'), c.from('releases').select('*')]);
+        if (a.error || r.error) throw (a.error || r.error);
+        ann = (a.data || []).map(mapAnn); rel = (r.data || []).map(mapRel);
+      }
+      if (gen !== meta.gen) return false;
+      const row = Array.isArray(st.data) ? st.data[0] : st.data;
+      const status = row ? { maintenance: !!row.maintenance_mode, maintenanceMsg: row.maintenance_message || '', notice: !!row.notice_enabled,
+        noticeText: row.notice_text || '', noticeLevel: row.notice_level === 'warning' ? 'warning' : 'info', updated: tsMs(row.updated_at) } : null;
+      const statusChanged = JSON.stringify(status) !== JSON.stringify(Shared.status);
+      const contentChanged = signed && JSON.stringify([ann, rel]) !== JSON.stringify([Shared.ann, Shared.rel]);
+      Shared.status = status; Shared.statusLoaded = true;
+      if (signed) { Shared.ann = ann; Shared.rel = rel; Shared.loaded = true; }
+      if (meta.booted && !quiet) {
+        if (contentChanged) { refreshNotifs(); paintNotifBadge(); }
+        /* never re-render public pages (would wipe what someone is typing into sign-in) or over an open dialog */
+        if ((statusChanged || (contentChanged && route.page === 'admin')) && !PUBLIC_PAGES.has(route.page) && !document.querySelector('.modal')) render();
+      }
+      return true;
+    } catch (e) { return false; }
+    finally { if (Shared.loading === run) Shared.loading = null; }
+  })();
+  Shared.loading = run; return run;
+}
+function sharedTick() { if (sharedOn() && !document.hidden && Date.now() - Shared.last > 5000) { Shared.last = Date.now(); sharedLoad(); } }
+/* Maintenance mode (Option A: a screen, not a lock). Admins, whose role comes from the server,
+   are never shown it. Public pages (sign-in, sign-up, password reset) are never gated. */
+function maintenanceView() {
+  if (AUTH_CONFIG.mode !== 'supabase' || !Shared.status || !Shared.status.maintenance || Access.role === 'admin') return null;
+  return h('div', { class: 'page narrow' }, h('div', { class: 'empty', role: 'status' },
+    h('h2', {}, 'CASE! is being updated'),
+    h('p', {}, Shared.status.maintenanceMsg || 'We’re doing some maintenance. Please check back soon. Your data is safe.'),
+    h('button', { class: 'btn', type: 'button', onclick: e => { const b = e.currentTarget; b.disabled = true; sharedLoad().then(() => { if (b.isConnected) b.disabled = false; }); } }, 'Check again')));
+}
+/* System notice + the admins' "maintenance is on" reminder, in the existing dashed notice style */
+function appBanners() {
+  if (AUTH_CONFIG.mode !== 'supabase' || !Shared.status) return null;
+  const st = Shared.status, out = [];
+  if (st.maintenance && Access.role === 'admin') out.push(h('div', { class: 'adm-dev', role: 'note' }, ic('gear', 20),
+    h('div', {}, h('strong', {}, 'Maintenance mode is on. '), 'Only admins can use CASE! right now. ', h('a', { href: '#/admin/maintenance' }, 'Turn it off'))));
+  if (st.notice && st.noticeText) out.push(h('div', { class: 'adm-dev', role: st.noticeLevel === 'warning' ? 'alert' : 'status' }, ic(st.noticeLevel === 'warning' ? 'shield' : 'bell', 20),
+    h('div', {}, h('strong', {}, st.noticeLevel === 'warning' ? 'Important: ' : 'Heads up: '), st.noticeText)));
+  return out.length ? h('div', { class: 'page case-banners' }, out) : null;
 }
 /* Shown instead of a page only when this account has NO copy on this device and the cloud
    hasn't answered yet (new device). Blank lists are never shown, so they can't be saved. */
@@ -2668,6 +2754,10 @@ function refreshNotifs() {
   const push = (key, type, title, body) => { if (have.has(key)) return; list.push({ id: uid(), key, type, title, body, created: Date.now(), read: false }); };
   if (s.tasks) get('todos').filter(t => !t.done && t.due && t.due >= ymd(now) && t.due <= ymd(soon)).forEach(t => push('task:' + t.id + ':' + t.due, 'tasks', 'Task due soon', `"${t.text}" is due ${shortDate(t.due)}.`));
   if (s.events) get('events').filter(e => e.date >= ymd(now) && e.date <= ymd(soon)).forEach(e => push('event:' + e.id, 'events', 'Upcoming event', `"${e.title}" on ${shortDate(e.date)}${e.time ? ' at ' + e.time : ''}.`));
+  if (AUTH_CONFIG.mode === 'supabase' && Shared.loaded) {   // only once the shared list really loaded
+    const live = new Set(liveAnnouncements().map(a => 'ann:' + a.id));
+    for (let i = list.length - 1; i >= 0; i--) { const n = list[i]; if (n.key && n.key.startsWith('ann:') && n.read === false && !live.has(n.key)) list.splice(i, 1); }
+  }
   if (s.general !== false) liveAnnouncements().forEach(a => push('ann:' + a.id, 'general', a.title, (a.version ? 'CASE! ' + verLabel(a.version) + ': ' : '') + a.message));
   if (list.length > 60) list.splice(0, list.length - 60);
   save('notifs');
@@ -3342,7 +3432,19 @@ function accountSection() {
         : Auth.isPreview() ? 'This clears only what CASE! has stored in this browser.' : 'This clears everything CASE! has stored for your account, on every device. Deleting the account itself isn\u2019t available in the app yet.'),
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data'),
-        h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Delete all CASE! data'))));
+        h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Delete all CASE! data'))),
+    aboutCard());
+}
+/* the current release, if an admin marked it visible (server only sends visible ones to non-admins) */
+function aboutCard() {
+  if (AUTH_CONFIG.mode !== 'supabase') return null;
+  const r = Shared.rel.find(x => x.current && x.published);
+  return h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'About CASE!'),
+    r ? [h('div', { class: 'kv' }, h('span', {}, 'Version'), h('span', {}, verLabel(r.version))),
+      h('div', { class: 'kv' }, h('span', {}, 'Released'), h('span', {}, parseYmd(r.date).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }))),
+      r.notes ? h('p', { class: 'psmall', style: { margin: '12px 0 4px' } }, h('b', {}, 'What’s new')) : null,
+      r.notes ? h('p', { class: 'adm-notes' }, r.notes) : null]
+      : h('p', { class: 'psmall' }, Shared.loaded ? 'No release information yet.' : 'Release information isn’t available right now.'));
 }
 async function clearAllData() {
   if (meta.mode === 'cloud' && (!meta.synced || Cloud.state !== 'ok')) { toast('CASE! can’t reach your account right now. Reconnect, then try again.', 'err'); return; }
@@ -4716,6 +4818,8 @@ function viewSignIn() {
     err, h('button', { class: 'btn primary wide lg pop', type: 'submit', onclick: onSubmit }, 'Sign in'));
   return authShell('Welcome back', 'Sign in to open your CASE! dashboard.', [
     previewNote('Real accounts aren’t connected yet, so your password isn’t checked or saved. Signing in opens the CASE! data stored in this browser.'),
+    AUTH_CONFIG.mode === 'supabase' && Shared.status && Shared.status.maintenance ? h('p', { class: 'auth-note', role: 'note' }, h('strong', {}, 'Maintenance. '),
+      'CASE! is being updated. You can still sign in, but most pages will be unavailable until it’s done.') : null,
     form, ...providerButtons(),
     h('p', { class: 'auth-alt', style: { marginTop: '18px' } }, 'New to CASE!? ', h('a', { href: '#/signup' }, 'Create account'))], 'signin');
 }
@@ -4861,14 +4965,17 @@ function render() {
   document.body.classList.toggle('public', isPublic);
   document.body.dataset.page = r.page;   // per-page accent (CSS: body[data-page=…])
   const main = $('#view');
-  let node = isPublic ? null : cloudBlockedView();
+  let node = isPublic ? null : (cloudBlockedView() || maintenanceView());
   if (!node) try {
     node = r.page === 'welcome' ? viewWelcome() : r.page === 'signin' ? viewSignIn() : r.page === 'signup' ? viewSignUp() : r.page === 'forgot' ? viewForgot() : r.page === 'reset' ? viewReset() :
       r.page === 'home' ? viewHome() : r.page === 'todo' ? viewTodo() : r.page === 'calendar' ? viewCalendar(r.arg) : r.page === 'notes' ? viewNotes(r.arg) : r.page === 'folders' ? viewFolders(r.arg) : r.page === 'settings' ? viewSettings(r.arg) : r.page === 'admin' ? viewAdmin(r.arg) : viewBoard(r.arg);
   } catch (e) {
     console.error(e); if (typeof noteAppError === 'function') noteAppError(e, 'Page: ' + r.page); node = h('div', { class: 'page narrow' }, h('div', { class: 'empty' }, h('h2', {}, 'Something went wrong on this page'), h('p', {}, 'Try going back to Home.'), h('a', { class: 'btn primary', href: '#/' }, 'Go home')));
   }
-  main.replaceChildren(node); main.scrollTop = 0; window.scrollTo(0, 0);
+  const banners = isPublic ? null : appBanners();
+  if (banners) { main.replaceChildren(banners, node); banners.style.maxWidth = getComputedStyle(node).maxWidth; }   // line up with the page below
+  else main.replaceChildren(node);
+  main.scrollTop = 0; window.scrollTo(0, 0);
   paintSide(); paintStreak(); paintMusic(); document.body.classList.remove('nav-open');
   if (!isPublic && meta.autoplayPending) { meta.autoplayPending = false; Ambience.play(get('settings').music.preset); }
   $$('.navbtn.menu').forEach(b => b.setAttribute('aria-expanded', 'false'));
@@ -4903,10 +5010,12 @@ async function boot() {
     meta.assets = null;
     finishAuthCallback(cb);
     cloudListeners();
+    const shared = sharedLoad(true);
     if (Auth.session) {
       const first = cloudSync(true);
       if (!have.profile) await Promise.race([first, sleepMs(12000)]);   // new device: wait for the cloud behind the boot screen
     }
+    await Promise.race([shared, sleepMs(3000)]);
     finishBoot(); paintStatus(); return;
   }
   let db = null, user = null, assets = null;
@@ -4950,8 +5059,23 @@ const ADMIN_SECTIONS = [
 const ANN_STATES = { draft: 'Draft', scheduled: 'Scheduled', published: 'Published', archived: 'Archived' };
 /* a scheduled announcement counts as published once its time has passed */
 function annState(a) { return a.status === 'scheduled' && a.publishAt && a.publishAt <= Date.now() ? 'published' : a.status; }
-function liveAnnouncements() { const ad = get('admin'); return (ad && ad.announcements || []).filter(a => annState(a) === 'published'); }
-function currentRelease() { return get('admin').releases.find(r => r.current) || null; }
+/* Supabase mode: the shared tables. Preview / Claude-artifact modes: the personal 'admin' key, as before. */
+function admCloud() { return AUTH_CONFIG.mode === 'supabase'; }
+function admList() { return admCloud() ? { announcements: Shared.ann, releases: Shared.rel } : get('admin'); }
+function liveAnnouncements() { const ad = admList(); return (ad && ad.announcements || []).filter(a => annState(a) === 'published'); }
+function currentRelease() { return admList().releases.find(r => r.current) || null; }
+function admErrMsg(e, fallback) {
+  const m = String((e && (e.message || e.details)) || '');
+  if (/CASE_LAST_ADMIN/.test(m)) return 'CASE! needs at least one admin, so that admin role can’t be removed.';
+  if (/CASE_FORBIDDEN|permission denied|row-level security/i.test(m)) return 'Only admins can do that.';
+  if (/releases_version_unique|duplicate key/i.test(m)) return 'That version already exists.';
+  if (/Failed to fetch|NetworkError|network|Load failed/i.test(m)) return 'CASE! couldn’t reach the server. Check your connection and try again.';
+  return fallback;
+}
+const sbc = () => SupabaseAuth.client;
+async function sbRun(p) { try { const r = await p; return r.error ? { error: r.error } : { data: r.data }; } catch (e) { return { error: e }; } }
+const annRow = a => ({ title: a.title, message: a.message, version: a.version || null, status: a.status,
+  publish_at: a.status === 'scheduled' && a.publishAt ? new Date(a.publishAt).toISOString() : null });
 const normVer = s => String(s || '').trim().replace(/^v(?=\d)/i, '');
 const verLabel = v => v ? (/^\d/.test(v) ? 'v' + v : v) : '';
 const fmtDT = ts => new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -4974,8 +5098,9 @@ function viewAdmin(arg) {
   const nav = h('nav', { class: 'set-nav adm-nav', 'aria-label': 'Admin sections' }, allowed.map(([id, label, icon]) =>
     h('a', { href: '#/admin' + (id === 'overview' ? '' : '/' + id), 'aria-current': sect === id ? 'page' : null }, ic(icon, 18), label)));
   const panel = h('div', { class: 'set-panel' });
-  const draw = () => setKids(panel, sect === 'users' ? admUsers() : sect === 'announcements' ? admAnnouncements(draw) :
-    sect === 'releases' ? admReleases(draw) : sect === 'maintenance' ? admMaintenance(draw) : admOverview());
+  if (admCloud()) { if (sect === 'overview') Object.assign(Shared, { stats: null, statsErr: false }); if (sect === 'users') Object.assign(Shared, { users: null, usersErr: false }); }
+  const draw = () => setKids(panel, sect === 'users' ? admUsers(draw) : sect === 'announcements' ? admAnnouncements(draw) :
+    sect === 'releases' ? admReleases(draw) : sect === 'maintenance' ? admMaintenance(draw) : admOverview(draw));
   draw();
   return h('div', { class: 'page adm-page' },
     h('div', { class: 'pagehead' }, h('div', {}, h('h1', { class: 'ptitle' }, 'Admin'), h('p', { class: 'psub' }, 'Releases, announcements, and the status of CASE!.'))),
@@ -5001,27 +5126,112 @@ function admEnvRows() {
 }
 
 /* ---------- Overview ---------- */
-function admOverview() {
-  const anns = get('admin').announcements, rel = currentRelease(), n = st => anns.filter(a => annState(a) === st).length;
+async function admLoadStats(redraw) {
+  Shared.statsLoading = true;
+  const r = await sbRun(sbc().rpc('admin_stats'));
+  Shared.statsLoading = false;
+  if (r.error) Shared.statsErr = true; else Shared.stats = Array.isArray(r.data) ? r.data[0] : r.data;
+  redraw();
+}
+function admOverview(redraw) {
+  const anns = admList().announcements, rel = currentRelease(), n = st => anns.filter(a => annState(a) === st).length;
   const tile = (label, value, sub, off) => h('div', { class: 'card adm-stat' + (off ? ' off' : '') }, h('span', { class: 'adm-stat-l' }, label), h('strong', { class: 'adm-stat-v' }, value), h('span', { class: 'adm-stat-s' }, sub));
   const recent = anns.slice().sort((a, b) => b.updated - a.updated).slice(0, 3);
-  return h('div', { class: 'adm-stack' },
-    h('div', { class: 'adm-stats' },
+  let tiles;
+  if (admCloud()) {                                  // real numbers from admin_stats() (admins only, checked by the server)
+    if (!Shared.stats && !Shared.statsErr && !Shared.statsLoading) admLoadStats(redraw);
+    const s = Shared.stats, v = k => s ? String(s[k]) : (Shared.statsErr ? '—' : '…'), sub = t => s ? t : (Shared.statsErr ? 'Couldn’t load' : 'Loading…');
+    const drafts = n('draft');
+    tiles = [
+      tile('Current version', rel ? verLabel(rel.version) : 'None set', rel ? 'Released ' + shortDate(rel.date) + (rel.published ? '' : ', hidden') : 'Add one in Releases'),
+      tile('Live announcements', String(n('published')), [drafts + (drafts === 1 ? ' draft' : ' drafts'), n('scheduled') ? n('scheduled') + ' scheduled' : null].filter(Boolean).join(', ')),
+      tile('Total users', v('total_users'), sub(s ? `${s.confirmed_users} confirmed, ${s.admins} ${+s.admins === 1 ? 'admin' : 'admins'}` : ''), !s),
+      tile('New this week', v('new_7d'), sub(s ? `${s.new_30d} in the last 30 days` : ''), !s),
+      tile('Signed in (7 days)', v('signed_in_7d'), sub('Logged in with email and password'), !s),
+      tile('Saved something (7 days)', v('saved_7d'), sub('Synced at least one change'), !s)];
+  } else tiles = [
       tile('Current version', rel ? verLabel(rel.version) : 'None set', rel ? 'Released ' + shortDate(rel.date) : 'Add one in Releases'),
       tile('Live announcements', String(n('published')), n('scheduled') ? n('scheduled') + ' scheduled' : 'None scheduled'),
       tile('Drafts', String(n('draft')), n('archived') + ' archived'),
       tile('Total users', '—', 'Needs a backend', true),
       tile('Active this week', '—', 'Needs a backend', true),
-      tile('New this week', '—', 'Needs a backend', true)),
-    h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'System status'), admEnvRows()),
+      tile('New this week', '—', 'Needs a backend', true)];
+  return h('div', { class: 'adm-stack' },
+    h('div', { class: 'adm-stats' }, tiles),
+    h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'System status'), admEnvRows(),
+      admCloud() ? h('p', { class: 'psmall adm-card-note' }, 'Not measured: page views, time spent in CASE!, which features people use, errors on other people’s devices, and device or browser details. “Signed in” counts password logins only; people who stayed signed in aren’t counted.') : null),
     h('div', { class: 'card settle' },
       h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Latest announcements'), h('a', { class: 'btn sm', href: '#/admin/announcements' }, 'Manage')),
       recent.length ? recent.map(a => h('div', { class: 'kv' }, h('span', {}, a.title), h('span', {}, h('span', { class: 'adm-pill ' + annState(a) }, ANN_STATES[annState(a)]))))
         : h('p', { class: 'psmall' }, 'No announcements yet. Write one to tell people what changed in CASE!.')));
 }
 
-/* ---------- Users (design only until there is a backend) ---------- */
-function admUsers() {
+/* ---------- Users ---------- */
+async function admLoadUsers(redraw) {
+  Shared.usersLoading = true;
+  const r = await sbRun(sbc().rpc('admin_list_users'));
+  Shared.usersLoading = false;
+  if (r.error) Shared.usersErr = true; else Shared.users = r.data || [];
+  redraw();
+}
+async function admChangeRole(u, role, redraw) {
+  const self = Auth.session && u.id === Auth.session.user.id;
+  const ok = role === 'admin'
+    ? await confirmBox('Make ' + u.email + ' an admin?', 'They’ll be able to see every account, manage announcements and releases, turn on maintenance mode, and change roles, including yours.', 'Make admin')
+    : await confirmBox(self ? 'Remove your own admin role?' : 'Remove admin from ' + u.email + '?',
+      self ? 'You’ll lose access to Admin right away and can’t undo this yourself. Another admin, or the Supabase SQL Editor, would have to give it back.' : 'They’ll lose access to Admin right away.', 'Remove admin');
+  if (!ok) return;
+  const r = await sbRun(sbc().rpc('admin_set_role', { p_user: u.id, p_role: role }));   // the server checks who is asking
+  if (r.error) toast(admErrMsg(r.error, 'Couldn’t change the role. Please try again.'), 'err');
+  else toast(role === 'admin' ? u.email + ' is now an admin.' : u.email + ' is no longer an admin.');
+  Object.assign(Shared, { users: null, usersErr: false, stats: null, statsErr: false });
+  if (self && !r.error) { await Access.refresh(); render(); return; }
+  redraw();
+}
+function admUsersCloud(redraw) {
+  if (!Shared.users && !Shared.usersErr && !Shared.usersLoading) admLoadUsers(redraw);
+  const list = Shared.users, me = Auth.session && Auth.session.user.id, admins = list ? list.filter(u => u.role === 'admin').length : 0;
+  const na = 'Needs a server function (not set up)';
+  const off = label => h('button', { class: 'btn sm' + (label === 'Delete' ? ' danger' : ''), type: 'button', disabled: true, title: na, 'aria-label': label + ' (needs a server function, not set up)' }, label);
+  const q = h('input', { class: 'field', type: 'search', placeholder: 'Search by email', 'aria-label': 'Search users' });
+  const fr = h('select', { class: 'field', 'aria-label': 'Filter by role' }, [['all', 'All roles'], ['admin', 'Admins'], ['user', 'Users']].map(([v, t]) => h('option', { value: v }, t)));
+  const fs = h('select', { class: 'field', 'aria-label': 'Filter by status' }, [['all', 'Any status'], ['confirmed', 'Confirmed'], ['unconfirmed', 'Unconfirmed']].map(([v, t]) => h('option', { value: v }, t)));
+  const day = v => new Date(v).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const rows = (list || []).map(u => {
+    const lastAdmin = u.role === 'admin' && admins <= 1;
+    const roleBtn = u.role === 'admin'
+      ? h('button', { class: 'btn sm', type: 'button', disabled: lastAdmin, title: lastAdmin ? 'CASE! needs at least one admin.' : null, onclick: () => admChangeRole(u, 'user', redraw) }, 'Remove admin')
+      : h('button', { class: 'btn sm', type: 'button', onclick: () => admChangeRole(u, 'admin', redraw) }, 'Make admin');
+    return h('tr', { 'data-id': u.id, 'data-email': String(u.email || '').toLowerCase(), 'data-role': u.role, 'data-status': u.email_confirmed ? 'confirmed' : 'unconfirmed' },
+      h('td', {}, h('b', {}, u.email || '—'), h('small', {}, (u.id === me ? 'You, joined ' : 'Joined ') + day(u.created_at))),
+      h('td', { 'data-label': 'Role' }, u.role === 'admin' ? 'Admin' : 'User'),
+      h('td', { 'data-label': 'Status' }, u.email_confirmed ? admBadge('ok', 'Confirmed') : admBadge('warn', 'Unconfirmed')),
+      h('td', { 'data-label': 'Signed in' }, u.last_sign_in_at ? ago(new Date(u.last_sign_in_at).getTime()) : 'Never'),
+      h('td', {}, h('div', { class: 'adm-acts' }, roleBtn, off('Suspend'), off('Delete'))));
+  });
+  const none = h('p', { class: 'psmall', hidden: true, style: { marginTop: '10px' }, role: 'status' });
+  const apply = () => { const t = q.value.trim().toLowerCase(); let shown = 0;
+    rows.forEach(r => { const ok = (!t || r.dataset.email.includes(t)) && (fr.value === 'all' || r.dataset.role === fr.value) && (fs.value === 'all' || r.dataset.status === fs.value); r.hidden = !ok; if (ok) shown++; });
+    const filtering = !!t || fr.value !== 'all' || fs.value !== 'all';
+    none.hidden = !rows.length || !filtering;
+    none.textContent = shown ? `Showing ${shown} of ${rows.length} ${rows.length === 1 ? 'account' : 'accounts'}.` : 'No accounts match.'; };
+  q.addEventListener('input', apply); fr.addEventListener('change', apply); fs.addEventListener('change', apply);
+  return h('div', { class: 'adm-stack' },
+    h('div', { class: 'card settle' },
+      h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Users'), list ? admBadge('ok', list.length + (list.length === 1 ? ' account' : ' accounts')) : Shared.usersErr ? admBadge('warn', 'Couldn’t load') : admBadge('off', 'Loading…')),
+      h('p', { class: 'psmall', style: { marginBottom: '14px' } }, 'Everyone with a CASE! account. Only admins can see this list. Passwords are never visible to anyone, including admins.'),
+      h('div', { class: 'adm-filters' }, q, fr, fs),
+      h('div', { class: 'adm-tablewrap' }, h('table', { class: 'adm-table adm-users' },
+        h('thead', {}, h('tr', {}, ['Account', 'Role', 'Status', 'Signed in', 'Actions'].map(t => h('th', { scope: 'col' }, t)))),
+        h('tbody', {}, rows))),
+      none,
+      Shared.usersErr ? h('div', { class: 'prow', style: { marginTop: '10px' } }, h('button', { class: 'btn sm', type: 'button', onclick: () => { Shared.usersErr = false; redraw(); } }, 'Retry')) : null,
+      list && admins <= 1 ? h('p', { class: 'psmall adm-card-note' }, 'There’s only one admin, so that admin role can’t be removed. Make someone else an admin first.') : null),
+    h('div', { class: 'card settle' }, h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Suspend and delete'), notConnected()),
+      h('p', { class: 'psmall' }, 'Suspending or deleting accounts needs a secure server function that holds Supabase’s secret key. That isn’t set up, so these buttons stay off. You can still manage accounts in the Supabase dashboard, under Authentication → Users.')));
+}
+function admUsers(redraw) {
+  if (admCloud()) return admUsersCloud(redraw);
   const s = Auth.session, na = 'Needs a backend';
   const act = (label, icon, danger) => h('button', { class: 'btn sm' + (danger ? ' danger' : ''), type: 'button', disabled: true, title: na, 'aria-label': label + ' (needs a backend)' }, label);
   return h('div', { class: 'adm-stack' },
@@ -5049,9 +5259,41 @@ function admUsers() {
 
 /* ---------- Announcements (working, saved with your data) ---------- */
 let admAnnFilter = 'all';
-function annMutate(id, fn, msg, redraw) {
+async function annMutate(id, fn, msg, redraw) {
+  if (admCloud()) {
+    const a0 = Shared.ann.find(x => x.id === id); if (!a0) return;
+    const a = { ...a0 }; fn(a);
+    const r = await sbRun(sbc().from('announcements').update(annRow(a)).eq('id', id));
+    if (r.error) { toast(admErrMsg(r.error, 'Couldn’t save the announcement. Please try again.'), 'err'); return; }
+    await sharedLoad(true); refreshNotifs(); paintNotifBadge(); if (msg) toast(msg); redraw(); return;
+  }
   const a = get('admin').announcements.find(x => x.id === id); if (!a) return;
   fn(a); a.updated = Date.now(); save('admin'); refreshNotifs(); paintNotifBadge(); if (msg) toast(msg); redraw();
+}
+/* one-time offer: copy the admin's personal (pre-Batch 3) items into the shared tables.
+   Announcements become drafts, releases become hidden; the personal 'admin' data is left as it is. */
+function admCopyCard(kind, redraw) {
+  if (!admCloud() || !Shared.loaded) return null;
+  const mine = (get('admin')[kind] || []), shared = kind === 'announcements' ? Shared.ann : Shared.rel;
+  if (shared.length || !mine.length) return null;
+  const n = mine.length, ann = kind === 'announcements', word = ann ? (n === 1 ? 'announcement' : 'announcements') : (n === 1 ? 'release' : 'releases');
+  let busy = false;
+  const go = async e => {
+    if (busy) return; busy = true; e.currentTarget.disabled = true;
+    const today = ymd(new Date());
+    const rows = ann
+      ? mine.map(a => ({ title: String(a.title || 'Untitled').slice(0, 90) || 'Untitled', message: String(a.message || '').slice(0, 600) || '(no message)', version: normVer(a.version).slice(0, 24) || null, status: 'draft' }))
+      : mine.filter((r, i) => normVer(r.version) && mine.findIndex(x => normVer(x.version).toLowerCase() === normVer(r.version).toLowerCase()) === i)
+        .map(r => ({ version: normVer(r.version).slice(0, 24), release_date: /^\d{4}-\d{2}-\d{2}$/.test(r.date || '') ? r.date : today, notes: String(r.notes || '').slice(0, 1500), published: false }));
+    const r = rows.length ? await sbRun(sbc().from(kind).insert(rows)) : {};
+    busy = false;
+    if (r.error) { toast(admErrMsg(r.error, 'Couldn’t copy them. Please try again.'), 'err'); redraw(); return; }
+    await sharedLoad(true); toast(`Copied ${rows.length} ${word} ${ann ? 'as drafts' : 'as hidden'}. Your saved copy is unchanged.`); redraw();
+  };
+  return h('div', { class: 'card settle' },
+    h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, ann ? 'Your earlier announcements' : 'Your earlier releases'), admBadge('warn', n + ' saved')),
+    h('p', { class: 'psmall' }, `You have ${n} ${word} saved from before CASE! had a shared list. Copy ${n === 1 ? 'it' : 'them'} to the shared list ${ann ? 'as drafts, so nothing is sent to anyone until you publish' : 'as hidden, so nobody sees them until you make them visible'}. Your saved copy stays as it is.`),
+    h('div', { class: 'prow', style: { marginTop: '10px' } }, h('button', { class: 'btn primary', type: 'button', onclick: go }, `Copy ${n} ${ann ? 'as drafts' : 'as hidden'}`)));
 }
 function annWhen(a) {
   const st = annState(a);
@@ -5061,7 +5303,7 @@ function annWhen(a) {
   return 'Edited ' + ago(a.updated);
 }
 function admAnnouncements(redraw) {
-  const ad = get('admin'), list = ad.announcements.slice().sort((a, b) => b.updated - a.updated);
+  const ad = admList(), list = ad.announcements.slice().sort((a, b) => b.updated - a.updated);
   const n = st => list.filter(a => annState(a) === st).length;
   const seg = h('div', { class: 'seg wrap', role: 'group', 'aria-label': 'Filter announcements' },
     [['all', 'All', list.length], ...Object.keys(ANN_STATES).map(k => [k, ANN_STATES[k], n(k)])].map(([id, l, c]) =>
@@ -5077,18 +5319,25 @@ function admAnnouncements(redraw) {
     if (st === 'archived') acts.push(b('Restore to drafts', null, () => annMutate(a.id, x => { x.status = 'draft'; x.publishAt = null; }, 'Restored to drafts.', redraw)));
     if (st !== 'published') acts.push(b('Delete', 'trash', async () => {
       if (!await confirmBox('Delete this announcement?', `“${a.title}” will be removed. This can’t be undone.`)) return;
+      if (admCloud()) {
+        const r = await sbRun(sbc().from('announcements').delete().eq('id', a.id));
+        if (r.error) { toast(admErrMsg(r.error, 'Couldn’t delete it. Please try again.'), 'err'); return; }
+        await sharedLoad(true); refreshNotifs(); paintNotifBadge(); toast('Announcement deleted.'); redraw(); return;
+      }
       ad.announcements = ad.announcements.filter(x => x.id !== a.id); save('admin'); toast('Announcement deleted.'); redraw();
     }, 'danger'));
     return h('article', { class: 'card adm-ann', 'data-state': st, 'data-id': a.id },
       h('div', { class: 'adm-ann-top' }, h('span', { class: 'adm-pill ' + st }, ANN_STATES[st]), a.version ? h('span', { class: 'adm-ver' }, verLabel(a.version)) : null, h('span', { class: 'adm-when' }, annWhen(a))),
       h('h3', { class: 'adm-ann-t' }, a.title), h('p', { class: 'adm-ann-m' }, a.message),
+      admCloud() && a.created ? h('p', { class: 'psmall adm-card-note' }, 'Created ' + fmtDT(a.created) + (a.updated && a.updated !== a.created ? ', updated ' + fmtDT(a.updated) : '')) : null,
       h('div', { class: 'prow adm-ann-acts' }, acts));
   };
   return h('div', { class: 'adm-stack' },
     h('div', { class: 'card settle' },
       h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Announcements'), h('button', { class: 'btn primary', type: 'button', onclick: () => announcementModal(null, redraw) }, ic('plus', 16), 'New announcement')),
-      h('p', { class: 'psmall', style: { marginBottom: '14px' } }, 'Published announcements appear in Notifications on this browser only. Sending them to everyone who uses CASE! needs a shared backend.'),
+      h('p', { class: 'psmall', style: { marginBottom: '14px' } }, admCloud() ? 'Published announcements appear in everyone’s Notifications within about a minute. Scheduled ones appear when their time comes.' : 'Published announcements appear in Notifications on this browser only. Sending them to everyone who uses CASE! needs a shared backend.'),
       seg),
+    admCopyCard('announcements', redraw),
     shown.length ? shown.map(card) : h('div', { class: 'card empty' }, ic('bell', 30),
       h('h2', {}, admAnnFilter === 'all' ? 'No announcements yet' : 'Nothing here'),
       h('p', {}, admAnnFilter === 'all' ? 'Write one to tell people about a new release or change.' : 'No announcements have this status right now.')));
@@ -5098,7 +5347,7 @@ function announcementModal(existing, redraw) {
   const isLive = existing && annState(existing) === 'published';
   const title = h('input', { class: 'field', value: a.title, maxlength: 90, placeholder: 'e.g. New moodboard tools' });
   const msg = h('textarea', { class: 'field', rows: 4, maxlength: 600, placeholder: 'What changed, in a sentence or two.' }); msg.value = a.message;
-  const dl = h('datalist', { id: 'adm-ver-list' }, get('admin').releases.map(r => h('option', { value: verLabel(r.version) })));
+  const dl = h('datalist', { id: 'adm-ver-list' }, admList().releases.map(r => h('option', { value: verLabel(r.version) })));
   const ver = h('input', { class: 'field', value: verLabel(a.version), maxlength: 24, placeholder: 'e.g. v1.4.0', list: 'adm-ver-list' });
   let mode = existing && existing.status === 'scheduled' && !isLive ? 'schedule' : 'draft';
   const when = h('input', { class: 'field', type: 'datetime-local', 'aria-label': 'Publish date and time', value: a.publishAt && !isLive ? toLocalInput(a.publishAt) : toLocalInput(Date.now() + 86400000) });
@@ -5108,8 +5357,10 @@ function announcementModal(existing, redraw) {
   const paintSeg = () => { setKids(seg, [['draft', 'Draft'], ['now', 'Publish now'], ['schedule', 'Schedule']].map(([id, l]) =>
     h('button', { type: 'button', 'aria-pressed': String(mode === id), onclick: () => { mode = id; paintSeg(); } }, l))); whenWrap.hidden = mode !== 'schedule'; };
   paintSeg();
+  let saving = false;
   const submit = close => {
     err.textContent = '';
+    if (saving) return;
     const t = title.value.trim(), m = msg.value.trim();
     if (!t) { err.textContent = 'Add a title.'; title.focus(); return; }
     if (!m) { err.textContent = 'Add a message.'; msg.focus(); return; }
@@ -5126,6 +5377,18 @@ function announcementModal(existing, redraw) {
       else if (mode === 'schedule') { a.status = 'scheduled'; a.publishAt = at; note = 'Scheduled for ' + fmtDT(at) + '.'; }
       else { a.status = 'draft'; a.publishAt = null; note = 'Draft saved.'; }
     }
+    if (admCloud()) {
+      saving = true;
+      const q = existing ? sbc().from('announcements').update(annRow(a)).eq('id', a.id) : sbc().from('announcements').insert(annRow(a));
+      sbRun(q).then(async r => {
+        saving = false;
+        if (r.error) { err.textContent = admErrMsg(r.error, 'Couldn’t save. Please try again.'); return; }
+        await sharedLoad(true); refreshNotifs(); paintNotifBadge(); close(true); toast(note);
+        if (!existing && admAnnFilter !== 'all' && admAnnFilter !== annState(a)) admAnnFilter = 'all';
+        redraw();
+      });
+      return;
+    }
     const l = get('admin').announcements, i = l.findIndex(x => x.id === a.id); if (i > -1) l[i] = a; else l.push(a);
     save('admin'); refreshNotifs(); paintNotifBadge(); close(true); toast(note);
     if (!existing && admAnnFilter !== 'all' && admAnnFilter !== annState(a)) admAnnFilter = 'all';
@@ -5141,23 +5404,37 @@ function announcementModal(existing, redraw) {
 
 /* ---------- Releases (product release info — GitHub stays the code history) ---------- */
 function admReleases(redraw) {
-  const ad = get('admin'), cur = currentRelease();
+  const cloud = admCloud(), ad = admList(), cur = currentRelease();
   const list = ad.releases.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.created - a.created);
-  const setCurrent = id => { ad.releases.forEach(r => r.current = r.id === id); save('admin'); toast('Current version updated.'); redraw(); };
+  const setCurrent = async id => {
+    if (cloud) {
+      const r = await sbRun(sbc().rpc('admin_set_current_release', { p_id: id }));
+      if (r.error) { toast(admErrMsg(r.error, 'Couldn’t change the current version.'), 'err'); return; }
+      await sharedLoad(true); toast('Current version updated.'); redraw(); return;
+    }
+    ad.releases.forEach(r => r.current = r.id === id); save('admin'); toast('Current version updated.'); redraw();
+  };
   const del = async r => {
     if (!await confirmBox('Delete this release?', `${verLabel(r.version)} and its notes will be removed. This can’t be undone.`)) return;
+    if (cloud) {
+      const x = await sbRun(sbc().from('releases').delete().eq('id', r.id));
+      if (x.error) { toast(admErrMsg(x.error, 'Couldn’t delete it. Please try again.'), 'err'); return; }
+      await sharedLoad(true); toast('Release deleted.'); redraw(); return;
+    }
     ad.releases = ad.releases.filter(x => x.id !== r.id); save('admin'); toast('Release deleted.'); redraw();
   };
+  const vis = r => cloud ? h('span', { class: 'adm-pill ' + (r.published ? 'published' : 'draft') }, r.published ? 'Visible' : 'Hidden') : null;
   return h('div', { class: 'adm-stack' },
     h('div', { class: 'card settle' },
       h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Current version'), h('button', { class: 'btn primary', type: 'button', onclick: () => releaseModal(null, redraw) }, ic('plus', 16), 'Add release')),
-      cur ? h('div', {}, h('div', { class: 'adm-rel-cur' }, h('span', { class: 'adm-rel-v' }, 'CASE! ' + verLabel(cur.version)), h('span', { class: 'psmall' }, 'Released ' + parseYmd(cur.date).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }))),
+      cur ? h('div', {}, h('div', { class: 'adm-rel-cur' }, h('span', { class: 'adm-rel-v' }, 'CASE! ' + verLabel(cur.version)), h('span', { class: 'psmall' }, 'Released ' + parseYmd(cur.date).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' })), vis(cur)),
         cur.notes ? h('p', { class: 'adm-notes' }, cur.notes) : h('p', { class: 'psmall', style: { marginTop: '8px' } }, 'No release notes.'))
         : h('p', { class: 'psmall' }, 'No current version yet. Add a release and mark it as current.'),
-      h('p', { class: 'psmall adm-card-note' }, 'This records what’s released for people using CASE!. Your code history stays in GitHub.')),
+      h('p', { class: 'psmall adm-card-note' }, cloud ? 'Releases are notes for people using CASE!. The current release, if visible, shows in everyone’s Settings → Account. Releases don’t deploy anything; deployments happen through GitHub and Vercel.' : 'This records what’s released for people using CASE!. Your code history stays in GitHub.')),
+    admCopyCard('releases', redraw),
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'All releases'),
       list.length ? list.map(r => h('div', { class: 'adm-rel-row', 'data-id': r.id },
-        h('div', {}, h('b', {}, verLabel(r.version)), ' ', r.current ? h('span', { class: 'adm-pill current' }, 'Current') : null),
+        h('div', {}, h('b', {}, verLabel(r.version)), ' ', r.current ? h('span', { class: 'adm-pill current' }, 'Current') : null, cloud ? ' ' : null, vis(r)),
         h('div', { style: { minWidth: 0 } }, h('small', {}, shortDate(r.date) + ', ' + parseYmd(r.date).getFullYear()), r.notes ? h('p', {}, r.notes) : null),
         h('div', { class: 'adm-acts' },
           r.current ? null : h('button', { class: 'btn sm', type: 'button', onclick: () => setCurrent(r.id) }, 'Set as current'),
@@ -5165,21 +5442,39 @@ function admReleases(redraw) {
           h('button', { class: 'btn sm danger', type: 'button', onclick: () => del(r) }, ic('trash', 15), 'Delete'))))
         : h('p', { class: 'psmall' }, 'No releases recorded yet.')),
     h('div', { class: 'card settle' }, h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Deployment'), notConnected()),
-      h('p', { class: 'psmall' }, 'Once CASE! is deployed on Vercel, the live build, its GitHub commit, and the environment can show here.')));
+      h('p', { class: 'psmall' }, cloud ? 'CASE! is deployed from GitHub by Vercel. Nothing on this page changes a deployment; live build details aren’t connected here.' : 'Once CASE! is deployed on Vercel, the live build, its GitHub commit, and the environment can show here.')));
 }
 function releaseModal(existing, redraw) {
-  const ad = get('admin');
+  const cloud = admCloud(), ad = admList();
   const ver = h('input', { class: 'field', value: existing ? verLabel(existing.version) : '', maxlength: 24, placeholder: 'e.g. v1.4.0' });
   const date = h('input', { class: 'field', type: 'date', value: existing ? existing.date : ymd(new Date()) });
   const notes = h('textarea', { class: 'field', rows: 5, maxlength: 1500, placeholder: 'What’s new in this release?' }); notes.value = existing ? existing.notes || '' : '';
   const curBox = h('input', { type: 'checkbox', checked: existing ? !!existing.current : true });
+  const visBox = cloud ? h('input', { type: 'checkbox', checked: existing ? !!existing.published : true }) : null;
   const err = h('p', { class: 'adm-err', role: 'alert' });
+  let saving = false;
   const submit = close => {
     err.textContent = '';
+    if (saving) return;
     const v = normVer(ver.value);
     if (!v) { err.textContent = 'Add a version, like v1.4.0.'; ver.focus(); return; }
     if (ad.releases.some(r => r.id !== (existing && existing.id) && r.version.toLowerCase() === v.toLowerCase())) { err.textContent = verLabel(v) + ' already exists.'; ver.focus(); return; }
     if (!date.value) { err.textContent = 'Pick a release date.'; date.focus(); return; }
+    if (cloud) {
+      saving = true;
+      (async () => {
+        const row = { version: v, release_date: date.value, notes: notes.value.trim(), published: visBox.checked };
+        let id = existing && existing.id, r;
+        if (existing) r = await sbRun(sbc().from('releases').update(row).eq('id', id));
+        else { r = await sbRun(sbc().from('releases').insert(row).select('id').single()); if (!r.error) id = r.data && r.data.id; }
+        if (!r.error && curBox.checked && !(existing && existing.current)) r = await sbRun(sbc().rpc('admin_set_current_release', { p_id: id }));
+        else if (!r.error && !curBox.checked && existing && existing.current) r = await sbRun(sbc().from('releases').update({ is_current: false }).eq('id', id));
+        saving = false;
+        if (r.error) { err.textContent = admErrMsg(r.error, 'Couldn’t save the release. Please try again.'); await sharedLoad(true); return; }
+        await sharedLoad(true); close(true); toast(existing ? 'Release updated.' : 'Release added.'); redraw();
+      })();
+      return;
+    }
     const r = existing ? ad.releases.find(x => x.id === existing.id) : { id: uid(), created: Date.now() };
     Object.assign(r, { version: v, date: date.value, notes: notes.value.trim() });
     if (!existing) ad.releases.push(r);
@@ -5188,20 +5483,60 @@ function releaseModal(existing, redraw) {
   };
   openModal({ title: existing ? 'Edit release' : 'Add release', wide: true,
     content: h('div', { class: 'pform' }, h('div', { class: 'two' }, h('label', { class: 'flabel' }, 'Version', ver), h('label', { class: 'flabel' }, 'Release date', date)),
-      h('label', { class: 'flabel' }, 'Release notes', notes), h('label', { class: 'adm-check' }, curBox, 'This is the current version'), err),
+      h('label', { class: 'flabel' }, 'Release notes', notes), h('label', { class: 'adm-check' }, curBox, 'This is the current version'),
+      visBox ? h('label', { class: 'adm-check' }, visBox, 'Visible to users') : null, err),
     actions: [{ label: 'Cancel', value: null }, { label: existing ? 'Save changes' : 'Add release', kind: 'primary', onclick: submit }] });
 }
 
 /* ---------- Maintenance ---------- */
+async function admSaveSettings(next, msg) {
+  const r = await sbRun(sbc().rpc('admin_set_app_settings', { p_maintenance_mode: !!next.maintenance, p_maintenance_message: next.maintenanceMsg || '',
+    p_notice_enabled: !!next.notice, p_notice_text: next.noticeText || '', p_notice_level: next.noticeLevel === 'warning' ? 'warning' : 'info' }));
+  if (r.error) { toast(admErrMsg(r.error, 'Couldn’t save. Please try again.'), 'err'); return; }
+  await sharedLoad(true); toast(msg); render();
+}
+function admMaintCards() {
+  const st = Shared.status, ready = Shared.statusLoaded && !!st;
+  const cur = st || { maintenance: false, maintenanceMsg: '', notice: false, noticeText: '', noticeLevel: 'info' };
+  const stateBadge = on => !ready ? admBadge('warn', 'Couldn’t load') : on ? admBadge('warn', 'On') : admBadge('ok', 'Off');
+  let mOn = cur.maintenance, nOn = cur.notice;
+  const mTog = toggle('Maintenance mode', mOn, v => { mOn = v; }, 'Everyone except admins sees a maintenance screen. Signing in, signing out, and password resets keep working.');
+  const mMsg = h('textarea', { class: 'field', rows: 2, maxlength: 300, placeholder: 'e.g. We’re updating CASE!. Back in about 15 minutes.' }); mMsg.value = cur.maintenanceMsg;
+  const nTog = toggle('Show system notice', nOn, v => { nOn = v; }, 'A banner at the top of every page for signed-in people.');
+  const nText = h('textarea', { class: 'field', rows: 2, maxlength: 300, placeholder: 'e.g. Planned downtime Saturday, 9 to 10 PM.' }); nText.value = cur.noticeText;
+  const nLvl = h('select', { class: 'field', 'aria-label': 'Notice style' }, h('option', { value: 'info' }, 'Heads up (info)'), h('option', { value: 'warning' }, 'Important (warning)')); nLvl.value = cur.noticeLevel;
+  if (!ready) [mTog, nTog].forEach(t => { $('input', t).disabled = true; t.classList.add('is-off'); });
+  const saveM = async () => {
+    if (mOn && !cur.maintenance && !await confirmBox('Turn on maintenance mode?', 'Everyone except admins will see a maintenance screen until you turn it off. Admins can keep using CASE!.', 'Turn on')) return;
+    await admSaveSettings({ ...cur, maintenance: mOn, maintenanceMsg: mMsg.value.trim() }, mOn === cur.maintenance ? 'Maintenance message saved.' : mOn ? 'Maintenance mode is on.' : 'Maintenance mode is off.');
+  };
+  const saveN = async () => {
+    if (nOn && !nText.value.trim()) { toast('Add the notice text first.', 'err'); nText.focus(); return; }
+    await admSaveSettings({ ...cur, notice: nOn, noticeText: nText.value.trim(), noticeLevel: nLvl.value }, nOn === cur.notice ? 'Notice saved.' : nOn ? 'System notice is showing.' : 'System notice is hidden.');
+  };
+  return [
+    h('div', { class: 'card settle' }, h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Maintenance mode'), stateBadge(cur.maintenance)),
+      h('p', { class: 'psmall' }, 'While it’s on, people who aren’t admins see a “CASE! is being updated” screen instead of their pages. Their data isn’t touched, and they can still sign in and out. It’s a screen, not a lock: it doesn’t stop saving on the server.'),
+      h('div', { class: 'togstack', style: { marginTop: '10px' } }, mTog),
+      h('label', { class: 'flabel' }, 'Message (optional)', mMsg),
+      h('div', { class: 'prow' }, h('button', { class: 'btn primary', type: 'button', disabled: !ready, onclick: saveM }, 'Save')),
+      h('p', { class: 'psmall adm-card-note' }, 'Locked out? Maintenance can always be turned off from the Supabase SQL Editor. The command is in batch3-admin.sql.')),
+    h('div', { class: 'card settle' }, h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'System notice'), stateBadge(cur.notice)),
+      h('p', { class: 'psmall' }, 'A banner across CASE! for everyone who’s signed in, for things like planned downtime. For release news, use Announcements.'),
+      h('div', { class: 'togstack', style: { marginTop: '10px' } }, nTog),
+      h('label', { class: 'flabel' }, 'Notice text', nText), h('label', { class: 'flabel' }, 'Style', nLvl),
+      h('div', { class: 'prow' }, h('button', { class: 'btn primary', type: 'button', disabled: !ready, onclick: saveN }, 'Save')))];
+}
 function admMaintenance(redraw) {
   const off = (label, help) => { const t = toggle(label, false, () => { }, help); t.classList.add('is-off'); $('input', t).disabled = true; return t; };
   const unavailable = (title, text, rows) => h('div', { class: 'card settle' }, h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, title), notConnected()), h('p', { class: 'psmall' }, text), rows || null);
   return h('div', { class: 'adm-stack' },
     h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Environment'), admEnvRows(),
       h('div', { class: 'kv' }, h('span', {}, 'Running from'), h('span', {}, location.protocol === 'file:' ? 'A file on this computer' : location.host || '—'))),
+    admCloud() ? admMaintCards() : [
     unavailable('Maintenance mode', 'Shows a “back soon” page to everyone while you work on CASE!. Needs a shared setting that every visitor’s app checks when it loads.',
       h('div', { class: 'togstack', style: { marginTop: '10px' } }, off('Maintenance mode', 'Everyone except admins sees a maintenance page.'))),
-    unavailable('System notices', 'A banner across CASE! for everyone, for things like planned downtime. For release news, use Announcements.'),
+    unavailable('System notices', 'A banner across CASE! for everyone, for things like planned downtime. For release news, use Announcements.')],
     unavailable('Feature flags', 'Turn new features on for some people before everyone. Needs flags stored on the server.'),
     h('div', { class: 'card settle' },
       h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Errors in this tab'),
