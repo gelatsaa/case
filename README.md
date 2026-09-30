@@ -5,7 +5,7 @@ A personal productivity and organizing web app: dashboard, to-do, calendar, note
 ## Current status: Phase 4, Batch 5 (Recently deleted, Quick Find, Restore) + Auth 1
 
 - Single-file vanilla HTML/CSS/JavaScript app (`index.html`). No framework, no build step.
-- **Sign-in:** real Supabase Auth (email + password): sign up with email confirmation (and resend), sign in, reset password, change password in Settings, sign out on this device or on all devices. Google/Apple sign-in not yet enabled.
+- **Sign-in:** real Supabase Auth (email + password): sign up with email confirmation (and resend), sign in, reset password, change password in Settings, sign out on this device or on all devices. Google/Apple sign-in: app side prepared (OAuth return handling, “Set a password” for Google/Apple-only accounts), buttons still switched off until each provider is configured in Supabase.
 - **Data:** synced to Supabase (`user_data`), with an offline copy per account in each browser.
 - **Files & images:** private Supabase Storage bucket `case-user-files`, one folder per account, readable only by its owner through short-lived signed links. 20 MB per file; images, PDF, video, CSV, Markdown, JSON, text (no SVG). Folders supports upload, drag-and-drop, open, download, and delete. Removed files are cleaned up the next time CASE! opens, only if nothing still uses them.
 - **Recently deleted:** deletes go to Settings → Recently deleted for 30 days (Undo right after deleting; Restore or Delete forever later). "Delete all CASE! data" stays permanent.

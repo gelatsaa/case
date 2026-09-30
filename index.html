@@ -3852,9 +3852,11 @@ function trashSection(redraw) {
 function securityCopy() {
   if (meta.mode === 'db') return h('p', { class: 'psmall' }, 'CASE! doesn\u2019t have its own password — signing in is handled by your Claude account, so password changes and active-session management happen there, not here.');
   if (Auth.isPreview()) return h('p', { class: 'psmall' }, 'This is a preview sign-in: CASE! doesn\u2019t check or store a password yet. Real accounts and password changes arrive with Supabase.');
-  const email = Auth.session && Auth.session.user.email;
-  return [h('p', { class: 'psmall' }, 'You sign in to CASE! with your email and password. Change it here, or if you\u2019ve forgotten it, we\u2019ll email you a secure link.'),
-    h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', disabled: !email, onclick: changePasswordModal }, 'Change password'), h('button', { class: 'btn', type: 'button', disabled: !email, onclick: async () => {
+  const email = Auth.session && Auth.session.user.email, hasPw = authHasPassword(Auth.session && Auth.session.user);
+  return [h('p', { class: 'psmall' }, hasPw ? 'You sign in to CASE! with your email and password. Change it here, or if you\u2019ve forgotten it, we\u2019ll email you a secure link.'
+      : `You sign in to CASE! with ${providerLabel(((Auth.session.user.app_metadata || {}).provider))}. You can also set a password, so you can sign in with your email address too.`),
+    h('div', { class: 'prow' }, hasPw ? h('button', { class: 'btn', type: 'button', disabled: !email, onclick: changePasswordModal }, 'Change password')
+      : h('button', { class: 'btn', type: 'button', disabled: !email, onclick: setPasswordModal }, 'Set a password'), h('button', { class: 'btn', type: 'button', disabled: !email, onclick: async () => {
       const r = await Auth.resetPassword(email); toast(r.error ? r.error.message : 'Reset link sent to ' + email + '. Open it in this browser.', r.error ? 'err' : undefined); } }, 'Email me a reset link'))];
 }
 function accountSection() {
@@ -4885,6 +4887,14 @@ function loadScriptOnce(src) {
     el.onload = res; el.onerror = () => { el.remove(); rej(new Error('script')); }; document.head.appendChild(el); });
 }
 function authRedirect(kind) { return location.origin + location.pathname + '?case=' + kind; }
+const OAUTH_PROVIDER_KEY = 'case:auth:oauth';
+const providerLabel = id => ({ google: 'Google', apple: 'Apple' })[id] || 'Google or Apple';
+/* does this account have a password? (email sign-in method, or CASE!'s own marker) */
+function authHasPassword(u) {
+  if (!u) return false;
+  const am = u.app_metadata || {}, provs = Array.isArray(am.providers) ? am.providers : (am.provider ? [am.provider] : []);
+  return provs.includes('email') || (Array.isArray(u.identities) && u.identities.some(i => i && i.provider === 'email')) || !!(u.user_metadata && u.user_metadata.case_password_set);
+}
 function friendlyAuthError(e) {
   const m = String((e && (e.message || e.error_description)) || '');
   if (/invalid login credentials/i.test(m)) return 'That email and password don’t match. Try again, or reset your password.';
@@ -4925,10 +4935,13 @@ const SupabaseAuth = {
   signUp({ email, password }) { return this._run(a => a.signUp({ email, password, options: { emailRedirectTo: authRedirect('confirmed') } })); },
   signInWithPassword({ email, password }) { return this._run(a => a.signInWithPassword({ email, password })); },
   resetPasswordForEmail(email) { return this._run(a => a.resetPasswordForEmail(email, { redirectTo: authRedirect('recovery') })); },
-  updatePassword(password) { return this._run(a => a.updateUser({ password })); },
+  /* the marker lets Settings know a password exists (Supabase doesn't list "email" as a sign-in
+     method after a password is added to a Google/Apple account) */
+  updatePassword(password) { return this._run(a => a.updateUser({ password, data: { case_password_set: true } })); },
   async signInWithOAuth({ provider }) {
     const p = AUTH_CONFIG.providers.find(x => x.id === provider);
     if (!p || !p.enabled) return { data: null, error: { code: 'not_configured', message: `${p ? p.label : provider} sign-in isn’t connected yet.` } };
+    try { sessionStorage.setItem(OAUTH_PROVIDER_KEY, provider); } catch (e) { }
     return this._run(a => a.signInWithOAuth({ provider, options: { redirectTo: authRedirect('oauth') } }));
   },
   /* scope: 'local' = this device only (the default for "Sign out"), 'global' = every device,
@@ -4968,7 +4981,11 @@ const Auth = {
   _emit() { this.listeners.forEach(fn => { try { fn(this.session); } catch (e) { } }); },
   async signUp(email, password) { const r = await this.adapter.signUp({ email, password }); if (!r.error && r.data && r.data.session) this._set(r.data.session); return r; },
   async signIn(email, password) { const r = await this.adapter.signInWithPassword({ email, password }); if (!r.error && r.data && r.data.session) this._set(r.data.session); return r; },
-  async updatePassword(password) { const r = await this.adapter.updatePassword(password); if (!r.error) this.recovery = false; return r; },
+  async updatePassword(password) {
+    const r = await this.adapter.updatePassword(password);
+    if (!r.error) { this.recovery = false; const u = this.session && this.session.user; if (u) u.user_metadata = { ...(u.user_metadata || {}), case_password_set: true }; }
+    return r;
+  },
   async resetPassword(email) { return this.adapter.resetPasswordForEmail(email); },
   async signInWithProvider(provider) { return this.adapter.signInWithOAuth({ provider }); },
   async signOut(scope = 'local') {
@@ -5121,6 +5138,37 @@ function resendButton(getEmail, label = 'Resend confirmation email') {
     wait = 60; tickLabel(); clearInterval(iv); iv = setInterval(() => { wait--; if (!b.isConnected || wait <= 0) { clearInterval(iv); wait = 0; } tickLabel(); }, 1000);
   });
   return b;
+}
+/* Google/Apple-only accounts: add a password (no "current password" exists). For safety this needs a
+   recent sign-in, so someone at an unlocked device can't quietly add a way into the account. */
+const SET_PW_WINDOW = 10 * 60 * 1000;
+function setPasswordModal() {
+  const u = Auth.session && Auth.session.user; if (!u) return;
+  const last = Date.parse(u.last_sign_in_at || '') || 0, prov = (u.app_metadata || {}).provider;
+  if (Date.now() - last > SET_PW_WINDOW) {
+    openModal({ title: 'Sign in again first', content: h('p', { class: 'mtext' }, `For your security, setting a password needs a fresh sign-in. Sign in with ${providerLabel(prov)} again, then come back here.`),
+      actions: [{ label: 'Cancel', value: null }, { label: 'Sign in again', kind: 'primary', onclick: async close => {
+        close(true); rememberNext('#/settings/privacy');
+        const r = await Auth.signInWithProvider(prov); if (r && r.error) toast(r.error.message, 'err'); } }] });
+    return;
+  }
+  const f = (label, name) => { const i = h('input', { class: 'field', type: 'password', name, autocomplete: 'new-password', required: true }); return [h('label', { class: 'flabel' }, label, i), i]; };
+  const [newL, nw] = f('New password', 'new-password'), [conL, con] = f('Confirm new password', 'confirm-password');
+  const err = h('p', { class: 'adm-err', role: 'alert' }); let busy = false;
+  openModal({ title: 'Set a password', content: h('div', { class: 'pform' },
+      h('p', { class: 'psmall' }, `Then you can sign in with ${u.email || 'your email'} and this password, as well as with ${providerLabel(prov)}.`),
+      newL, h('p', { class: 'psmall', style: { marginTop: '-6px' } }, 'At least 8 characters.'), conL, err),
+    actions: [{ label: 'Cancel', value: null }, { label: 'Set password', kind: 'primary', onclick: async close => {
+      err.textContent = '';
+      if (busy) return;
+      if (nw.value.length < 8) { err.textContent = 'Use at least 8 characters for your password.'; nw.focus(); return; }
+      if (nw.value !== con.value) { err.textContent = 'The two passwords don’t match.'; con.focus(); return; }
+      busy = true; const r = await Auth.updatePassword(nw.value); busy = false;
+      if (r.error) { err.textContent = r.error.message; return; }
+      nw.value = con.value = ''; close(true); toast('Password set. You can now also sign in with your email and password.');
+      render();
+    } }] });
+  setTimeout(() => nw.focus(), 50);
 }
 function changePasswordModal() {
   const f = (label, name, ac) => { const i = h('input', { class: 'field', type: 'password', name, autocomplete: ac, required: true }); return [h('label', { class: 'flabel' }, label, i), i]; };
@@ -5516,6 +5564,7 @@ function finishSignIn(toHome) { const n = takeNext(), dest = toHome ? '#/' : n; 
 
 function viewSignIn() {
   const err = h('p', { class: 'auth-err', role: 'alert' });
+  if (Auth.authNotice) { err.textContent = Auth.authNotice; Auth.authNotice = null; }
   const email = authField('Email', { type: 'email', name: 'email', autocomplete: 'email', required: true });
   const pw = authField('Password', { type: 'password', name: 'password', autocomplete: 'current-password', required: true });
   /* Sign-in logic runs from the button's click as well as the form's submit: sandboxed previews
@@ -5562,7 +5611,8 @@ function viewSignUp() {
     if (!Auth.isPreview() && !(r.data && r.data.session)) {   // Supabase: email confirmation required
       form.replaceWith(h('div', {}, h('div', { class: 'auth-done', role: 'status' }, 'Check your email. We sent a confirmation link to ', h('strong', {}, em),
         '. Open it in this same browser to finish creating your account.'),
-        h('p', { class: 'auth-alt', style: { marginTop: '14px' } }, 'Didn’t get it? Check spam, or ', resendButton(() => em, 'Resend email'))));
+        h('p', { class: 'auth-alt', style: { marginTop: '14px' } }, 'Didn’t get it? Check spam, or ', resendButton(() => em, 'Resend email')),
+        AUTH_CONFIG.providers.some(p => p.enabled) ? h('p', { class: 'auth-alt', style: { marginTop: '8px' } }, 'If you’ve used Continue with Google or Apple with this email before, sign in that way instead.') : null));
       return;
     }
     toast(Auth.isPreview() ? 'Preview session started. No account was created.' : 'Account created. Welcome to CASE!'); finishSignIn(true);
@@ -5639,6 +5689,20 @@ function readAuthCallback() {
 function finishAuthCallback(cb) {
   if (!cb) return;
   let to = '#/', msg = null;
+  if (cb.kind === 'oauth') {                             // back from Continue with Google / Apple
+    let prov = null; try { prov = sessionStorage.getItem(OAUTH_PROVIDER_KEY); sessionStorage.removeItem(OAUTH_PROVIDER_KEY); } catch (e) { }
+    const name = providerLabel(prov);
+    if (!cb.error && Auth.isSignedIn()) { to = takeNext(); msg = 'Signed in.'; }
+    else {
+      to = '#/signin';
+      Auth.authNotice = cb.error === 'access_denied'
+        ? `${name} sign-in was cancelled. You can try again, or sign in with your email and password.`
+        : `CASE! couldn’t finish signing you in with ${name}. Please try again.`;
+    }
+    try { history.replaceState(null, '', location.pathname + to); } catch (e) { location.hash = to; }
+    if (msg) setTimeout(() => toast(msg), 300);
+    return;
+  }
   if (cb.error) { to = cb.kind === 'recovery' ? '#/forgot-password' : '#/signin'; msg = cb.code === 'otp_expired' ? 'That link has expired or was already used. Please request a new one.' : 'That link didn’t work. Please try again.'; }
   else if (cb.kind === 'recovery') { if (Auth.isSignedIn()) { Auth.recovery = true; to = '#/reset-password'; } else { to = '#/forgot-password'; msg = 'That reset link didn’t work in this browser. Request a new one here.'; } }
   else if (cb.kind === 'confirmed') { if (Auth.isSignedIn()) msg = 'Email confirmed. Welcome to CASE!'; else { to = '#/signin'; msg = 'Your email is confirmed. Sign in to continue.'; } }
