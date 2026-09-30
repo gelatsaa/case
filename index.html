@@ -4841,7 +4841,7 @@ const AUTH_CONFIG = {
      NEVER put a secret key (sb_secret_…), a service_role key, or the database password here. */
   supabase: { url: 'https://xpdnjhwhvtkzroejzgrt.supabase.co', anonKey: 'sb_publishable_0DXZu7FMWTSLrM02v17AjQ_qmeOhEZ2' },
   providers: [                              // OAuth providers: shown, but disabled until configured
-    { id: 'google', label: 'Google', enabled: false },
+    { id: 'google', label: 'Google', enabled: true },     // on: provider configured in Supabase → Sign In / Providers
     { id: 'apple', label: 'Apple', enabled: false }
   ]
 };
@@ -5612,7 +5612,7 @@ function viewSignUp() {
       form.replaceWith(h('div', {}, h('div', { class: 'auth-done', role: 'status' }, 'Check your email. We sent a confirmation link to ', h('strong', {}, em),
         '. Open it in this same browser to finish creating your account.'),
         h('p', { class: 'auth-alt', style: { marginTop: '14px' } }, 'Didn’t get it? Check spam, or ', resendButton(() => em, 'Resend email')),
-        AUTH_CONFIG.providers.some(p => p.enabled) ? h('p', { class: 'auth-alt', style: { marginTop: '8px' } }, 'If you’ve used Continue with Google or Apple with this email before, sign in that way instead.') : null));
+        AUTH_CONFIG.providers.some(p => p.enabled) ? h('p', { class: 'auth-alt', style: { marginTop: '8px' } }, `If you’ve used Continue with ${AUTH_CONFIG.providers.filter(p => p.enabled).map(p => p.label).join(' or ')} with this email before, sign in that way instead.`) : null));
       return;
     }
     toast(Auth.isPreview() ? 'Preview session started. No account was created.' : 'Account created. Welcome to CASE!'); finishSignIn(true);
