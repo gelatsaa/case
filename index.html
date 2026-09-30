@@ -149,6 +149,27 @@ main{ flex:1; min-width:0; padding:28px 34px 80px; }
 .toastbox{ position:fixed; left:50%; bottom:22px; transform:translateX(-50%); display:flex; flex-direction:column; gap:8px; z-index:900; padding-bottom:env(safe-area-inset-bottom,0px); }
 .toast{ background:var(--solid); color:var(--solid-ink); padding:11px 18px; border-radius:11px; font-size:13.5px; font-weight:700; box-shadow:var(--shadow-lift); animation:toastin .25s ease; }
 .toast.err{ background:var(--red-d); }
+.toast-act{ margin-left:14px; padding:0; background:none; border:none; color:inherit; font:inherit; font-weight:800; text-decoration:underline; text-underline-offset:3px; cursor:pointer; }
+/* Settings → Recently deleted */
+.trash-list{ display:flex; flex-direction:column; margin-top:12px; }
+.trash-row{ display:flex; align-items:center; gap:12px; padding:10px 2px; border-bottom:1px dashed var(--line); flex-wrap:wrap; }
+.trash-row:last-child{ border-bottom:none; }
+.trash-ic{ display:flex; color:var(--ink3); }
+.trash-main{ flex:1 1 200px; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.trash-main b{ overflow-wrap:anywhere; }
+.trash-main small{ color:var(--ink3); font-size:12.5px; }
+/* Quick Find */
+.qf{ display:flex; flex-direction:column; gap:10px; }
+.qf-list{ max-height:min(56vh, 440px); overflow:auto; display:flex; flex-direction:column; gap:2px; }
+.qf-group{ font-size:11.5px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:var(--ink3); padding:10px 10px 4px; }
+.qf-opt{ display:flex; align-items:center; gap:10px; width:100%; padding:8px 10px; border-radius:10px; border:none; background:none; color:var(--ink); font:inherit; text-align:left; cursor:pointer; min-width:0; }
+.qf-opt > span:last-child{ display:flex; flex-direction:column; min-width:0; }
+.qf-opt .qf-t{ font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qf-opt small{ color:var(--ink3); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qf-opt[aria-selected="true"]{ background:var(--solid); color:var(--solid-ink); }
+.qf-opt[aria-selected="true"] small{ color:inherit; opacity:.8; }
+.qf-empty{ padding:14px 10px; color:var(--ink3); font-size:13.5px; }
+.qf-kbd{ margin-left:auto; font-size:11px; font-weight:700; color:var(--ink3); border:1.5px solid var(--line2); border-radius:6px; padding:1px 6px; }
 @keyframes toastin{ from{opacity:0; transform:translateY(8px)} }
 .scrim{ position:fixed; inset:0; background:rgba(20,17,10,.4); display:flex; align-items:center; justify-content:center; z-index:800; padding:20px; }
 .modal{ background:var(--card); border-radius:18px; padding:26px; width:100%; max-width:420px; box-shadow:var(--shadow-lift); max-height:88vh; overflow:auto; }
@@ -1973,6 +1994,7 @@ const ICONS = {
   music: '<path d="M9 18V5.5l10-2v11"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="14.5" r="2.5"/>',
   vol: '<path d="M4 10v4h3.5l4.5 4V6l-4.5 4z"/><path d="M16.5 9a4.5 4.5 0 0 1 0 6M19 6.5a8 8 0 0 1 0 11"/>',
   mute: '<path d="M4 10v4h3.5l4.5 4V6l-4.5 4z"/><path d="m16.5 10 4 4m0-4-4 4"/>',
+  search: '<circle cx="11" cy="11" r="6.6"/><path d="M16 16l4.4 4.4"/>',
   spotify: '<circle cx="12" cy="12" r="9.3"/><path d="M7 9.8c3.2-.9 7-.6 9.6.9M7.4 13c2.6-.7 5.6-.5 7.8.7M7.8 16c2-.5 4.4-.4 6.1.5"/>',
   apple: '<path d="M15.3 4.2c-1 0-2.2.6-2.9 1.4-.6.7-1.1 1.8-1 2.9 1.1 0 2.2-.6 2.9-1.4.6-.7 1.1-1.8 1-2.9zM17 9c-1.6-.1-3 .9-3.8.9-.8 0-2-.9-3.3-.8-1.7 0-3.2 1-4.1 2.5-1.7 3-.4 7.5 1.3 10 .8 1.2 1.8 2.5 3.1 2.5 1.2 0 1.7-.8 3.2-.8s1.9.8 3.2.8c1.3 0 2.2-1.2 3-2.4.9-1.4 1.3-2.8 1.3-2.9-.1 0-2.6-1-2.6-3.9 0-2.5 2-3.6 2.1-3.7-1.1-1.7-2.9-1.9-3.4-2.2z" fill="currentColor" stroke="none"/>',
   bell: '<path d="M6 10.5a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 14.5 6 10.5z"/><path d="M10 19a2 2 0 0 0 4 0"/>',
@@ -2418,10 +2440,11 @@ function seed() {
 }
 
 /* ================= toast & modal ================= */
-function toast(msg, kind) {
+function toast(msg, kind, action) {
   const box = $('#toast'); if (!box) return;
-  const t = h('div', { class: 'toast' + (kind === 'err' ? ' err' : '') }, msg);
-  box.append(t); setTimeout(() => t.remove(), 4200);
+  const t = h('div', { class: 'toast' + (kind === 'err' ? ' err' : '') }, msg,
+    action ? h('button', { class: 'toast-act', type: 'button', onclick: () => { t.remove(); action.fn(); } }, action.label) : null);
+  box.append(t); setTimeout(() => t.remove(), action ? 8000 : 4200);
 }
 function openModal({ title, content, actions = [], wide = false, onClose }) {
   const prev = document.activeElement; let closed = false;
@@ -2548,6 +2571,7 @@ function sbPrefetch() { return sbSign([...sbRefs()]); }
 /* called by the Batch 2 sync after every successful download */
 function sbAfterSync() {
   if (!cloudOn()) return;
+  if (meta.trashGen !== meta.gen) { meta.trashGen = meta.gen; trashAutoPurge(); }   // before the Storage sweep; purged files go at the NEXT start
   sbPrefetch();
   if (meta.sweptGen !== meta.gen) { meta.sweptGen = meta.gen; sbSweep(); }
 }
@@ -2934,6 +2958,7 @@ function paintSide() {
   const foot = $('#sidefoot');
   if (foot) setKids(foot,
     Access.can('admin.view') ? h('a', { class: 'sfoot-btn adm-link', href: '#/admin', 'aria-current': route.page === 'admin' ? 'page' : null }, ic('shield', 18), 'Admin', Access.isDevGrant() ? h('span', { class: 'adm-devtag', title: 'Development preview' }, 'dev') : null) : null,
+    h('button', { class: 'sfoot-btn', type: 'button', 'aria-label': 'Search (' + QF_KEY + ')', onclick: () => { if (window.matchMedia && matchMedia('(max-width: 900px)').matches) document.body.classList.remove('nav-open'); openQuickFind(); } }, ic('search', 18), 'Search', h('span', { class: 'qf-kbd', 'aria-hidden': 'true' }, QF_KEY)),
     h('a', { class: 'sfoot-btn', href: '#/settings', 'aria-current': route.page === 'settings' ? 'page' : null, 'aria-label': 'Settings' }, ic('gear', 18), 'Settings'),
     h('button', { class: 'sfoot-btn notifbtn', type: 'button', 'aria-label': 'Notifications', onclick: openNotifPanel }, ic('bell', 18), 'Notifications', h('span', { class: 'notif-badge', hidden: true })),
     Auth.isSignedIn() ? h('button', { class: 'sfoot-btn', type: 'button', onclick: signOutFlow }, ic('logout', 18), 'Sign out') : null);
@@ -3188,7 +3213,7 @@ function taskEditor(existing) {
       h('label', { class: 'flabel' }, 'Recurrence', recurSel), recurExtra,
       h('h3', { class: 'set-h sm' }, 'Progress'),
       h('div', {}, pctRange, h('div', { class: 'prow' }, pctLabel, h('span', { class: 'sp' }), presetRow))),
-    actions: [{ label: 'Cancel', value: null }, { label: t ? 'Save changes' : 'Add task', kind: 'primary', onclick: save1 }, ...(t ? [{ label: 'Delete', kind: 'danger', onclick: async c => { if (await confirmBox('Delete this task?', `"${t.text}" will be removed.`)) { S.todos = get('todos').filter(x => x.id !== t.id); save('todos'); c(true); rerender(); } } }] : [])]
+    actions: [{ label: 'Cancel', value: null }, { label: t ? 'Save changes' : 'Add task', kind: 'primary', onclick: save1 }, ...(t ? [{ label: 'Delete', kind: 'danger', onclick: async c => { if (await confirmBox('Delete this task?', `"${t.text}" moves to Recently deleted for 30 days.`)) { const op = trashOp(), cur = get('todos').find(x => x.id === t.id) || t; toTrash(op, 'task', cur.text, cur, { folder: cur.folderId || null }); trashSave(); S.todos = get('todos').filter(x => x.id !== t.id); save('todos'); c(true); rerender(); trashToast(op, 'Task moved to Recently deleted.'); } } }] : [])]
   });
   text.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save1(m.close); });
 }
@@ -3450,7 +3475,7 @@ function viewTodo() {
     if (sortSel.value === 'folder') list = list.slice().sort((a, b) => (folderName(a.folderId) || '').localeCompare(folderName(b.folderId) || ''));
     setKids(paper, ...list.map(t => todoRow(t, draw, { pill: true })));
     const blanks = Math.max(3, 8 - list.length); for (let i = 0; i < blanks; i++) appendKids(paper, h('div', { class: 'trow blank' }, !list.length && i === 0 ? h('span', { class: 'hint' }, 'Nothing matches this filter.') : null));
-    setKids(foot, done ? h('button', { class: 'btn ghost', type: 'button', onclick: async () => { if (await confirmBox('Clear finished tasks?', `Remove ${done} finished task${done > 1 ? 's' : ''}? This can't be undone.`, 'Clear')) { S.todos = get('todos').filter(t => !t.done); save('todos'); draw(); } } }, `Clear ${done} finished`) : null);
+    setKids(foot, done ? h('button', { class: 'btn ghost', type: 'button', onclick: async () => { if (await confirmBox('Clear finished tasks?', `Move ${done} finished task${done > 1 ? 's' : ''} to Recently deleted? ${done > 1 ? 'They’re' : 'It’s'} kept for 30 days.`, 'Clear')) { const op = trashOp(), fin = get('todos').filter(t => t.done); fin.forEach(t => toTrash(op, 'task', t.text, t, { folder: t.folderId || null })); trashSave(); S.todos = get('todos').filter(t => !t.done); save('todos'); draw(); trashToast(op, `${fin.length} finished task${fin.length === 1 ? '' : 's'} moved to Recently deleted.`); } } }, `Clear ${done} finished`) : null);
   }
   draw(); paintStreak();
   return h('div', { class: 'page narrow' }, h('div', { class: 'pagehead' }, h('div', {}, h('h1', { class: 'ptitle' }, 'To-do'), sub), todoStreakCard()),
@@ -3473,7 +3498,7 @@ const THEMES = [
 const ACCENTS = ['#3b6fd4', '#d9483b', '#4a9a56', '#7a5cd6', '#e8833a', '#c98f00', '#2aa7c9'];
 const SETTINGS_SECTIONS = [
   ['profile', 'Profile', 'user'], ['appearance', 'Appearance', 'palette'], ['notifications', 'Notifications', 'bell'],
-  ['music', 'Music & Audio', 'music'], ['privacy', 'Privacy & Security', 'shield'], ['account', 'Account', 'gear']
+  ['music', 'Music & Audio', 'music'], ['privacy', 'Privacy & Security', 'shield'], ['trash', 'Recently deleted', 'trash'], ['account', 'Account', 'gear']
 ];
 function toggle(label, checked, onchange, help) {
   const inp = h('input', { type: 'checkbox', checked, onchange: e => onchange(e.target.checked) });
@@ -3488,7 +3513,8 @@ function viewSettings(arg) {
     sect === 'appearance' ? appearanceSection() :
     sect === 'notifications' ? notifSection() :
     sect === 'music' ? musicSection() :
-    sect === 'privacy' ? privacySection() : accountSection());
+    sect === 'privacy' ? privacySection() :
+    sect === 'trash' ? trashSection(() => draw()) : accountSection());
   draw();
   return h('div', { class: 'page wide' }, h('div', { class: 'pagehead' }, h('h1', { class: 'ptitle' }, 'Settings')),
     h('div', { class: 'settings-layout' }, nav, panel));
@@ -3553,7 +3579,111 @@ function privacySection() {
       h('div', { class: 'prow' },
         h('button', { class: 'btn', type: 'button', onclick: exportData }, ic('download', 16), 'Export my data as JSON'),
         h('button', { class: 'btn danger', type: 'button', onclick: clearAllData }, ic('trash', 16), 'Clear all CASE! data'))),
-    legacyImportCard());
+    legacyImportCard(),
+    restoreCard());
+}
+const EXPORT_KEY_RE = /^(profile|todos|notes|events|files|boards|settings|notifs|admin|trash|board_[a-z0-9]{1,40})$/;
+const restoreReady = () => meta.mode === 'cloud' && meta.synced && Cloud.state === 'ok' && navigator.onLine !== false;
+const RESTORE_OFFLINE = 'CASE! can’t reach your account right now, so nothing was restored. Reconnect, then try again.';
+function restoreCard() {
+  if (AUTH_CONFIG.mode !== 'supabase' || meta.mode !== 'cloud') return null;
+  const input = h('input', { type: 'file', accept: '.json,application/json', hidden: true, onchange: async e => { const f = e.target.files && e.target.files[0]; e.target.value = ''; if (f) await restoreFromFile(f); } });
+  return h('div', { class: 'card settle' }, h('h2', { class: 'set-h' }, 'Restore from a CASE! export'),
+    h('p', { class: 'psmall' }, 'Bring back items from an export you downloaded earlier with “Export my data.” Only missing items are added: nothing in your account is changed or replaced, and your settings stay as they are.'),
+    h('div', { class: 'prow' }, h('button', { class: 'btn', type: 'button', onclick: () => { if (!restoreReady()) { toast(RESTORE_OFFLINE, 'err'); return; } input.click(); } }, ic('upload', 16), 'Choose export file…')), input);
+}
+function parseCaseExport(txt) {
+  let o; try { o = JSON.parse(txt); } catch (e) { return { error: 'That file isn’t a CASE! export (it isn’t valid JSON).' }; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return { error: 'That file isn’t a CASE! export.' };
+  if (o.keys && typeof o.source === 'string' && /case:v1|preview/i.test(o.source)) return { error: 'That’s a preview backup, not an export. Use “Import from this browser” for preview data.' };
+  let d = null;
+  if (o.app === 'CASE!' && o.kind === 'case-export') {
+    if (typeof o.version === 'number' && o.version > 1) return { error: 'That export was made by a newer version of CASE!, so it can’t be restored here.' };
+    if (!o.data || typeof o.data !== 'object' || Array.isArray(o.data)) return { error: 'That CASE! export is damaged, so nothing was restored.' };
+    d = o.data;
+  } else { const ks = Object.keys(o); if (ks.length && ks.every(k => EXPORT_KEY_RE.test(k)) && ['todos', 'notes', 'events', 'files', 'boards'].some(k => k in o)) d = o; }   // older exports (no marker)
+  if (!d) return { error: 'That file isn’t a CASE! export.' };
+  const bad = (k, ok) => k in d && !ok(d[k]);
+  if (bad('todos', Array.isArray) || bad('notes', Array.isArray) || bad('events', Array.isArray) || bad('files', v => v && Array.isArray(v.folders) && Array.isArray(v.items)) || bad('boards', v => v && Array.isArray(v.list)))
+    return { error: 'That CASE! export is damaged, so nothing was restored.' };
+  return { data: d };
+}
+/* only YOUR files that still exist can be relinked (Storage's own rules decide what can be signed) */
+async function restoreCheckRefs(D) {
+  const ok = new Set(), mine = [...new Set((JSON.stringify(D).match(/"sb:[^"\\]+"/g) || []).map(x => x.slice(1, -1)))].filter(id => id.startsWith('sb:' + meta.uid + '/') && !id.includes('..'));
+  for (let i = 0; i < mine.length && cloudOn(); i += 100) {
+    const chunk = mine.slice(i, i + 100), r = await sbRun(sbc().storage.from(SB_BUCKET).createSignedUrls(chunk.map(sbKey), 60));
+    if (!r.error) (r.data || []).forEach(x => { if (x && !x.error && (x.signedUrl || x.signedURL)) ok.add('sb:' + x.path); });
+  }
+  return ok;
+}
+function restorePlan(D, okRefs) {
+  const TR = trashIds(), A = { todos: get('todos'), notes: get('notes'), events: get('events'), files: get('files'), boards: get('boards') };
+  const pick = (src, acct, tr) => { const ids = new Set(acct.map(x => x.id)), r = { add: [], skip: 0, trash: 0 };
+    legacyArr(src).forEach(x => { if (ids.has(x.id)) r.skip++; else if (tr.has(x.id)) r.trash++; else { ids.add(x.id); r.add.push(x); } }); return r; };
+  const okAsset = a => isSb(a) && okRefs.has(a), f = D.files || {}, items = pick(f.items, A.files.items, TR.item);
+  const lost = items.add.filter(i => i.asset && !okAsset(i.asset)); items.add = items.add.filter(i => !lost.includes(i));
+  const boards = pick(D.boards && D.boards.list, A.boards.list, TR.board);
+  { const taken = boards.add.filter(b => have['board_' + b.id]); boards.add = boards.add.filter(b => !have['board_' + b.id]); boards.skip += taken.length; }
+  let lostImages = 0; boards.add.forEach(b => legacyArr((D['board_' + b.id] || {}).items).forEach(it => { if (it.asset && !okAsset(it.asset)) lostImages++; }));
+  return { todos: pick(D.todos, A.todos, TR.task), notes: pick(D.notes, A.notes, TR.note), events: pick(D.events, A.events, TR.event),
+    folders: pick(f.folders, A.files.folders, TR.folder), items, boards, lostFiles: lost.length, lostImages };
+}
+async function restoreFromFile(file) {
+  if (!restoreReady()) { toast(RESTORE_OFFLINE, 'err'); return; }
+  if (file.size > 25 * 1048576) { toast('That file is larger than 25 MB, so it isn’t a CASE! export.', 'err'); return; }
+  let txt; try { txt = await file.text(); } catch (e) { toast('CASE! couldn’t read that file.', 'err'); return; }
+  const r = parseCaseExport(txt); if (r.error) { toast(r.error, 'err'); return; }
+  const okRefs = await restoreCheckRefs(r.data);
+  if (!restoreReady()) { toast(RESTORE_OFFLINE, 'err'); return; }
+  restoreModal(r.data, okRefs);
+}
+function restoreModal(D, okRefs) {
+  const o = { todos: true, notes: true, events: true, folders: true, boards: true }, body = h('div', { class: 'pform' }); let busy = false;
+  const names = (list, f) => list.slice(0, 3).map(f).filter(Boolean).join(', ') + (list.length > 3 ? ', …' : '');
+  const draw = () => {
+    const P = restorePlan(D, okRefs);
+    const txt = r => `${r.add.length} to add` + (r.skip ? `, ${r.skip} already in your account` : '') + (r.trash ? `, ${r.trash} in Recently deleted (restore ${r.trash === 1 ? 'it' : 'them'} from there)` : '');
+    const row = (k, label, r, f) => h('label', { class: 'adm-check' }, h('input', { type: 'checkbox', checked: o[k], onchange: e => { o[k] = e.target.checked; draw(); } }),
+      h('span', {}, h('b', {}, label), ': ' + txt(r), r.add.length ? h('small', { class: 'psmall', style: { display: 'block' } }, names(r.add, f)) : null));
+    const fl = { add: P.folders.add.concat(P.items.add), skip: P.folders.skip + P.items.skip, trash: P.folders.trash + P.items.trash };
+    const lost = P.lostFiles + P.lostImages;
+    setKids(body,
+      row('todos', 'Tasks', P.todos, t => t.text), row('notes', 'Notes', P.notes, n => n.title || 'Untitled note'), row('events', 'Calendar events', P.events, e => e.title),
+      row('folders', 'Folders, files, and links', fl, x => x.name), row('boards', 'Moodboards', P.boards, b => b.name),
+      lost ? h('p', { class: 'psmall' }, `${lost} file${lost === 1 ? '' : 's'} or image${lost === 1 ? '' : 's'} can’t be restored: they belong to another account, were permanently removed, or were stored in the Claude version.`) : null,
+      h('p', { class: 'psmall adm-card-note' }, 'Not restored: settings and theme, profile, notifications, admin data, and Recently deleted. Nothing in your account is changed or removed.'));
+  };
+  draw();
+  openModal({ title: 'Restore from a CASE! export', wide: true, content: body, actions: [{ label: 'Cancel', value: null }, { label: 'Restore', kind: 'primary', onclick: async close => {
+    if (busy) return; busy = true; const r = restoreApply(D, o, okRefs); busy = false;
+    if (r) { close(true); toast(r); render(); paintSide(); }
+  } }] });
+}
+function restoreApply(D, o, okRefs) {
+  if (!restoreReady()) { toast(RESTORE_OFFLINE, 'err'); return null; }
+  const P = restorePlan(D, okRefs), c = trClone, okAsset = a => isSb(a) && okRefs.has(a); let added = 0;
+  const folderIds = new Set(get('files').folders.map(f => f.id)); if (o.folders) P.folders.add.forEach(f => folderIds.add(f.id));
+  const fix = (x, ...ks) => { ks.forEach(k => { if (x[k] && !folderIds.has(x[k])) x[k] = null; }); return x; };
+  if (o.boards && P.boards.add.length) {
+    const list = [];
+    P.boards.add.forEach(b => {
+      if (have['board_' + b.id]) return;                                      // never overwrite a stored board
+      const data = c(D['board_' + b.id] || { items: [] }); data.items = legacyArr(data.items).filter(it => !(it.asset && !okAsset(it.asset)));
+      S['board_' + b.id] = data; save('board_' + b.id); list.push(fix(c(b), 'folderId'));
+    });
+    const bd = get('boards'); list.forEach(b => bd.list.push(b)); save('boards'); added += list.length;
+  }
+  if (o.todos && P.todos.add.length) { const t = get('todos'); P.todos.add.forEach(x => t.push(fix(c(x), 'folderId', 'folder'))); save('todos'); added += P.todos.add.length; }
+  if (o.notes && P.notes.add.length) { const t = get('notes'); P.notes.add.forEach(x => t.push(fix(c(x), 'folderId'))); save('notes'); added += P.notes.add.length; }
+  if (o.events && P.events.add.length) { const t = get('events'); P.events.add.forEach(x => t.push(c(x))); save('events'); added += P.events.add.length; }
+  if (o.folders && (P.folders.add.length || P.items.add.length)) {
+    const f = get('files'); P.folders.add.forEach(x => f.folders.push(fix(c(x), 'parent'))); P.items.add.forEach(x => f.items.push(fix(c(x), 'folder')));
+    save('files'); added += P.folders.add.length + P.items.add.length;
+  }
+  sbPrefetch();
+  const lost = P.lostFiles + P.lostImages;
+  return added ? `Restored ${added} item${added === 1 ? '' : 's'}.` + (lost ? ` ${lost} file${lost === 1 ? '' : 's'} or image${lost === 1 ? '' : 's'} couldn’t be restored.` : '') : 'Nothing to restore: everything in that export is already in your account.';
 }
 
 /* ================= Import from this browser (legacy "case:v1:" preview data, Batch 4) =================
@@ -3566,19 +3696,20 @@ function legacyKeys() { try { return Object.keys(localStorage).filter(k => k.sta
 function legacyData() { const out = {}; legacyKeys().forEach(k => { try { const w = JSON.parse(localStorage.getItem(k)); if (w && typeof w === 'object' && 'v' in w) out[k.slice(LEGACY_PREFIX.length)] = w.v; } catch (e) { } }); return out; }
 const legacyArr = v => Array.isArray(v) ? v.filter(x => x && typeof x === 'object' && x.id) : [];
 function legacyPlan(L, o) {
-  const A = { todos: get('todos'), notes: get('notes'), events: get('events'), files: get('files'), boards: get('boards') };
-  const pick = (src, acct, sample) => { const ids = new Set(acct.map(x => x.id)), r = { add: [], skip: 0, samples: 0 };
-    legacyArr(src).forEach(x => { if (ids.has(x.id)) r.skip++; else if (o.skipSamples && sample && sample(x)) r.samples++; else { ids.add(x.id); r.add.push(x); } }); return r; };
-  const lf = L.files || {}, items = pick(lf.items, A.files.items);
+  const A = { todos: get('todos'), notes: get('notes'), events: get('events'), files: get('files'), boards: get('boards') }, TR = trashIds();
+  const pick = (src, acct, sample, tr) => { const ids = new Set(acct.map(x => x.id)), r = { add: [], skip: 0, samples: 0 };
+    legacyArr(src).forEach(x => { if (ids.has(x.id) || (tr && tr.has(x.id))) r.skip++; else if (o.skipSamples && sample && sample(x)) r.samples++; else { ids.add(x.id); r.add.push(x); } }); return r; };
+  const lf = L.files || {}, items = pick(lf.items, A.files.items, null, TR.item);
   const oldFiles = items.add.filter(i => i.kind === 'file' && i.asset && !isSb(i.asset)); items.add = items.add.filter(i => !oldFiles.includes(i));
-  const boards = pick(L.boards && L.boards.list, A.boards.list);
+  const boards = pick(L.boards && L.boards.list, A.boards.list, null, TR.board);
+  { const taken = boards.add.filter(b => have['board_' + b.id]); boards.add = boards.add.filter(b => !have['board_' + b.id]); boards.skip += taken.length; }   // never overwrite a stored board row
   let images = 0, oldImages = 0;
   boards.add.forEach(b => legacyArr((L['board_' + b.id] || {}).items).forEach(it => { if (it.type === 'image' && it.data) images++; else if (it.type === 'image' && it.asset && !isSb(it.asset)) oldImages++; }));
   const lp = L.profile || {}, p = get('profile');
   const photo = !!(lp.photo && lp.photo.data) && !p.photo, banner = !!(lp.banner && lp.banner.data) && !p.banner;
-  return { todos: pick(L.todos, A.todos, t => LEGACY_SAMPLE_TODOS.includes(t.text)),
-    notes: pick(L.notes, A.notes, n => n.title === 'Welcome to CASE!' && String(n.body || '').includes('This is your notebook')),
-    events: pick(L.events, A.events), folders: pick(lf.folders, A.files.folders), items, boards, images, oldImages, oldFiles: oldFiles.length, photo, banner };
+  return { todos: pick(L.todos, A.todos, t => LEGACY_SAMPLE_TODOS.includes(t.text), TR.task),
+    notes: pick(L.notes, A.notes, n => n.title === 'Welcome to CASE!' && String(n.body || '').includes('This is your notebook'), TR.note),
+    events: pick(L.events, A.events, null, TR.event), folders: pick(lf.folders, A.files.folders, null, TR.folder), items, boards, images, oldImages, oldFiles: oldFiles.length, photo, banner };
 }
 function legacyBackup() {
   const keys = {}; legacyKeys().forEach(k => { keys[k] = localStorage.getItem(k); });
@@ -3681,6 +3812,42 @@ async function legacyImport(L, o) {
   sbPrefetch();
   return `Imported ${added} item${added === 1 ? '' : 's'}` + (up ? `, with ${up} image${up === 1 ? '' : 's'} moved to your private storage` : '') + (inline ? `. ${inline} image${inline === 1 ? '' : 's'} couldn’t be uploaded and stayed as small copies` : '') + '. Your preview data is still in this browser.';
 }
+/* Settings → Recently deleted */
+let trashFilter = 'all';
+function trashSection(redraw) {
+  const t = trashData(), now = Date.now();
+  const groups = [['all', 'All'], ['task', 'Tasks'], ['note', 'Notes'], ['event', 'Events'], ['files', 'Folders & files'], ['board', 'Moodboards']];
+  const inF = e => trashFilter === 'all' || (trashFilter === 'files' ? (e.kind === 'folder' || e.kind === 'item') : e.kind === trashFilter);
+  const list = t.entries.filter(inF).sort((a, b) => b.deletedAt - a.deletedAt);
+  const ICON = { task: 'todo', note: 'notes', event: 'cal', item: 'file', folder: 'folder', board: 'board' };
+  const left = e => { const d = Math.max(0, Math.ceil((e.deletedAt + TRASH_MS - now) / 86400000)); return d === 0 ? 'clears today' : `clears in ${d} day${d === 1 ? '' : 's'}`; };
+  const what = e => {
+    if (e.kind === 'folder') { const p = e.payload || {}, fo = (p.folders || []).length - 1, it = (p.items || []).length;
+      return 'Folder' + (fo + it ? ` with ${[fo ? fo + ' folder' + (fo === 1 ? '' : 's') : null, it ? it + ' item' + (it === 1 ? '' : 's') : null].filter(Boolean).join(' and ')}` : ''); }
+    if (e.kind === 'item') return e.payload && e.payload.kind === 'link' ? 'Link' : fileTypeLabel(e.payload && e.payload.type);
+    return TRASH_KIND[e.kind] || 'Item';
+  };
+  const rows = list.map(e => h('div', { class: 'trash-row', 'data-id': e.id },
+    h('span', { class: 'trash-ic' }, ic(ICON[e.kind] || 'file', 18)),
+    h('div', { class: 'trash-main' }, h('b', {}, e.label), h('small', {}, `${what(e)} · deleted ${ago(e.deletedAt)} · ${left(e)}`)),
+    h('div', { class: 'prow' },
+      h('button', { class: 'btn sm', type: 'button', onclick: () => { trashRestore([e]); redraw(); } }, 'Restore'),
+      h('button', { class: 'btn sm danger', type: 'button', onclick: async () => {
+        if (!await confirmBox('Delete forever?', `“${e.label}” will be removed permanently. This can’t be undone.`, 'Delete forever')) return;
+        trashRemove(new Set([e.id]), true); toast('Deleted forever.'); redraw(); } }, 'Delete forever'))));
+  const seg = h('div', { class: 'seg wrap', role: 'group', 'aria-label': 'Show', style: { marginTop: '12px' } },
+    groups.map(([id, l]) => h('button', { type: 'button', 'aria-pressed': String(trashFilter === id), onclick: () => { trashFilter = id; redraw(); } }, l)));
+  return h('div', { class: 'set-stack' }, h('div', { class: 'card settle' },
+    h('div', { class: 'adm-h' }, h('h2', { class: 'set-h' }, 'Recently deleted'),
+      t.entries.length ? h('button', { class: 'btn sm danger', type: 'button', onclick: async () => {
+        const n = trashData().entries.length;
+        if (!await confirmBox('Empty Recently deleted?', `All ${n} item${n === 1 ? '' : 's'} will be removed permanently. This can’t be undone.`, 'Empty')) return;
+        trashRemove(new Set(trashData().entries.map(e => e.id)), true); toast('Recently deleted is empty.'); redraw(); } }, ic('trash', 15), 'Empty') : null),
+    h('p', { class: 'psmall' }, 'Deleted tasks, notes, events, folders, files, and moodboards stay here for 30 days, then they’re removed for good. Restore puts them back where they were.'),
+    t.entries.length ? seg : null,
+    list.length ? h('div', { class: 'trash-list' }, rows)
+      : h('p', { class: 'psmall', style: { marginTop: '12px' } }, t.entries.length ? 'Nothing of this type here.' : 'Nothing here. Things you delete will show up here for 30 days.')));
+}
 /* Sign-in & security text, honest for each mode */
 function securityCopy() {
   if (meta.mode === 'db') return h('p', { class: 'psmall' }, 'CASE! doesn\u2019t have its own password — signing in is handled by your Claude account, so password changes and active-session management happen there, not here.');
@@ -3736,10 +3903,118 @@ async function clearAllData() {
 }
 function exportData() {
   const dump = {}; Object.keys(have).forEach(k => { if (have[k]) dump[k] = S[k]; });
-  const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+  /* marked as a CASE! export so "Restore from a CASE! export" can recognise it */
+  const blob = new Blob([JSON.stringify({ app: 'CASE!', kind: 'case-export', version: 1, exportedAt: new Date().toISOString(), data: dump }, null, 2)], { type: 'application/json' });
   const a = h('a', { href: URL.createObjectURL(blob), download: 'case-data.json', hidden: true });
   appendKids(document.body, a); a.click(); setTimeout(() => { a.remove(); URL.revokeObjectURL(a.href); }, 1000);
   toast('Export downloaded.');
+}
+
+/* ================= Recently deleted (Batch 5) =================
+   Deleting moves things into one synced "trash" key instead of removing them. Each entry keeps the
+   exact record(s). Moodboards keep their own board_<id> row (only the list entry moves), so big
+   boards never bloat the trash. Nothing is sent to Storage cleanup until an entry is deleted
+   forever (or passes 30 days); the Batch 4 cleanup then removes files nothing references. */
+const TRASH_MS = 30 * 86400000, TRASH_MAX_CHARS = 3500000;
+const TRASH_KIND = { task: 'Task', note: 'Note', event: 'Event', item: 'File or link', folder: 'Folder', board: 'Moodboard' };
+const trClone = x => JSON.parse(JSON.stringify(x));
+function trashData() { let t = get('trash'); if (!t || !Array.isArray(t.entries)) { S.trash = { v: 1, entries: [] }; t = S.trash; } return t; }
+function trashOp() { return 'op_' + uid() + uid(); }
+function toTrash(op, kind, label, payload, from) {
+  trashData().entries.push({ id: 'tr_' + uid() + uid(), op, kind, label: String(label || '').trim().slice(0, 120) || (kind === 'note' ? 'Untitled note' : 'Untitled'),
+    deletedAt: Date.now(), from: from || {}, payload: trClone(payload) });
+}
+/* save the trash FIRST, then the lists (a crash in between leaves a duplicate, never a loss) */
+function trashSave() {
+  const t = trashData(); let dropped = 0;
+  t.entries.sort((a, b) => a.deletedAt - b.deletedAt);
+  while (t.entries.length > 1 && JSON.stringify(t).length > TRASH_MAX_CHARS) { trashPurgeEntry(t.entries.shift()); dropped++; }
+  save('trash');
+  if (dropped) toast(`Recently deleted was full, so the ${dropped} oldest item${dropped === 1 ? ' was' : 's were'} removed for good.`);
+}
+function trashToast(op, msg) { toast(msg, undefined, { label: 'Undo', fn: () => trashRestore(trashData().entries.filter(e => e.op === op), true) }); }
+function trAssets(x, out = []) {
+  if (Array.isArray(x)) x.forEach(v => trAssets(v, out));
+  else if (x && typeof x === 'object') { if (typeof x.asset === 'string') out.push(x.asset); Object.keys(x).forEach(k => { if (k !== 'asset') trAssets(x[k], out); }); }
+  return out;
+}
+/* gone for good: queue its files (removed at the next app start if nothing uses them) */
+function trashPurgeEntry(e) {
+  const assets = trAssets(e.payload);
+  if (e.kind === 'board' && e.payload && e.payload.board) {
+    const id = e.payload.board.id;
+    if (!get('boards').list.some(b => b.id === id)) { trAssets(S['board_' + id]).forEach(a => assets.push(a)); if (have['board_' + id]) removeKey('board_' + id); }
+  }
+  assets.forEach(a => dropAsset(a));
+}
+function trashRemove(ids, purge) {
+  const t = trashData(), gone = t.entries.filter(e => ids.has(e.id));
+  t.entries = t.entries.filter(e => !ids.has(e.id));
+  if (purge) gone.forEach(trashPurgeEntry);
+  save('trash'); return gone.length;
+}
+function trashAutoPurge() {
+  if (!have.trash) return;
+  const cut = Date.now() - TRASH_MS, old = trashData().entries.filter(e => (e.deletedAt || 0) < cut);
+  if (old.length) trashRemove(new Set(old.map(e => e.id)), true);
+}
+/* ids of everything in the trash, by kind (restore/import never add something that is in here) */
+function trashIds() {
+  const s = { task: new Set(), note: new Set(), event: new Set(), item: new Set(), folder: new Set(), board: new Set() };
+  trashData().entries.forEach(e => { const p = e.payload || {};
+    if (e.kind === 'folder') { (p.folders || []).forEach(f => s.folder.add(f.id)); (p.items || []).forEach(i => s.item.add(i.id)); }
+    else if (e.kind === 'board') { if (p.board) s.board.add(p.board.id); }
+    else if (p.id && s[e.kind]) s[e.kind].add(p.id); });
+  return s;
+}
+/* move things to the trash (callers save the list they changed, then show trashToast) */
+function trashItem(it, op) { toTrash(op, 'item', it.name, it, { folder: it.folder || null }); }
+function trashFolderTree(id, op) {
+  const f = get('files'), top = f.folders.find(x => x.id === id); if (!top) return;
+  const ids = new Set([id]); let grew = true;
+  while (grew) { grew = false; f.folders.forEach(x => { if (x.parent && ids.has(x.parent) && !ids.has(x.id)) { ids.add(x.id); grew = true; } }); }
+  toTrash(op, 'folder', top.name, { folders: f.folders.filter(x => ids.has(x.id)), items: f.items.filter(i => ids.has(i.folder)) }, { folder: top.parent || null });
+  S.files = { folders: f.folders.filter(x => !ids.has(x.id)), items: f.items.filter(i => !ids.has(i.folder)) };
+}
+function trashBoard(id, op) {
+  const bd = get('boards'), b = bd.list.find(x => x.id === id); if (!b) return;
+  toTrash(op, 'board', b.name, { board: b }, { folder: b.folderId || null });
+  bd.list = bd.list.filter(x => x.id !== id); if (bd.active === id) bd.active = bd.list[0] ? bd.list[0].id : null;
+}
+/* put entries back where they were; anything whose folder is gone goes to the top level */
+function trashRestore(entries, fromUndo) {
+  if (!entries.length) return 0;
+  const fids = () => new Set(get('files').folders.map(f => f.id)), touched = new Set(), notes = []; let n = 0;
+  const order = { folder: 0, board: 1, item: 2, task: 3, note: 4, event: 5 };
+  entries.slice().sort((a, b) => (order[a.kind] - order[b.kind]) || (a.deletedAt - b.deletedAt)).forEach(e => {
+    const p = trClone(e.payload || {});
+    if (e.kind === 'folder') {
+      const f = get('files'), have1 = fids(), items = new Set(f.items.map(i => i.id)), tree = p.folders || [], inTree = new Set(tree.map(x => x.id)); let added = false;
+      tree.forEach(x => { if (have1.has(x.id)) return; if (x.parent && !inTree.has(x.parent) && !have1.has(x.parent)) { x.parent = null; notes.push(`“${x.name}” went back to the top level because its folder is gone.`); } f.folders.push(x); added = true; });
+      (p.items || []).forEach(i => { if (!items.has(i.id)) { f.items.push(i); added = true; } });
+      if (added) { touched.add('files'); n++; }
+    } else if (e.kind === 'item') {
+      const f = get('files'); if (f.items.some(i => i.id === p.id)) return;
+      if (p.folder && !fids().has(p.folder)) { p.folder = null; notes.push(`“${p.name}” went back to the top level because its folder is gone.`); }
+      f.items.push(p); touched.add('files'); n++;
+    } else if (e.kind === 'board') {
+      const bd = get('boards'), b = p.board; if (!b || bd.list.some(x => x.id === b.id)) return;
+      if (b.folderId && !fids().has(b.folderId)) b.folderId = null;
+      if (!have['board_' + b.id]) { S['board_' + b.id] = { items: [] }; save('board_' + b.id); }
+      bd.list.push(b); touched.add('boards'); n++;
+    } else {
+      const key = { task: 'todos', note: 'notes', event: 'events' }[e.kind]; if (!key) return;
+      const l = get(key); if (l.some(x => x.id === p.id)) return;
+      if (p.folderId && !fids().has(p.folderId)) p.folderId = null;
+      if (p.folder && !fids().has(p.folder)) p.folder = null;
+      l.push(p); touched.add(key); n++;
+    }
+  });
+  touched.forEach(k => save(k));                                   // lists first …
+  const ids = new Set(entries.map(e => e.id)), t = trashData(); t.entries = t.entries.filter(e => !ids.has(e.id)); save('trash');   // … then the trash
+  toast(fromUndo ? 'Restored.' : (n === 1 ? 'Restored.' : `Restored ${n} items.`) + (notes.length ? ' ' + notes[0] : ''));
+  if (meta.booted && !$('.modal')) { render(); paintSide(); }
+  return n;
 }
 
 const CAL = { y: new Date().getFullYear(), m: new Date().getMonth(), sel: ymd(new Date()) };
@@ -3754,7 +4029,7 @@ function eventModal(ev, date) {
   paint();
   const save1 = c => { const v = title.value.trim(); if (!v) { title.focus(); return; } if (!dt.value) { dt.focus(); return; } e.title = v; e.date = dt.value; e.time = tm.value; const l = get('events'), i = l.findIndex(x => x.id === e.id); if (i > -1) l[i] = e; else l.push(e); save('events'); CAL.sel = e.date; const d = parseYmd(e.date); CAL.y = d.getFullYear(); CAL.m = d.getMonth(); c(true); rerender(); };
   const acts = [{ label: 'Cancel', value: null }, { label: 'Save event', kind: 'primary', onclick: save1 }];
-  if (ev) acts.unshift({ label: 'Delete', kind: 'danger', onclick: c => { S.events = get('events').filter(x => x.id !== e.id); save('events'); c(true); rerender(); } });
+  if (ev) acts.unshift({ label: 'Delete', kind: 'danger', onclick: c => { const op = trashOp(), cur = get('events').find(x => x.id === e.id) || ev; toTrash(op, 'event', cur.title || 'Untitled event', cur, {}); trashSave(); S.events = get('events').filter(x => x.id !== e.id); save('events'); c(true); rerender(); trashToast(op, 'Event moved to Recently deleted.'); } });
   const m = openModal({ title: ev ? 'Edit event' : 'New event', content: h('div', { class: 'pform' }, h('label', { class: 'flabel' }, 'Title', title), h('div', { class: 'two' }, h('label', { class: 'flabel' }, 'Date', dt), h('label', { class: 'flabel' }, 'Time (optional)', tm)), h('div', {}, h('span', { class: 'flabel' }, 'Color'), sw)), actions: acts });
   title.addEventListener('keydown', k => { if (k.key === 'Enter') save1(m.close); });
 }
@@ -3872,8 +4147,9 @@ function viewNotes(arg) {
       n ? h('button', { class: 'btn sm danger', type: 'button', onclick: () => bulkDeleteNotes() }, ic('trash', 14), 'Delete') : null);
   }
   async function bulkDeleteNotes() {
-    const n = noteSelIds.size; if (!await confirmBox(`Delete ${n} note${n > 1 ? 's' : ''}?`, 'This cannot be undone.', 'Delete')) return;
-    S.notes = all().filter(x => !noteSelIds.has(x.id)); save('notes'); noteSelIds.clear(); drawList(); paintSelBar(); toast(`Deleted ${n} note${n > 1 ? 's' : ''}.`);
+    const n = noteSelIds.size; if (!await confirmBox(`Delete ${n} note${n > 1 ? 's' : ''}?`, `${n > 1 ? 'They move' : 'It moves'} to Recently deleted for 30 days.`, 'Delete')) return;
+    const op = trashOp(); all().filter(x => noteSelIds.has(x.id)).forEach(x => toTrash(op, 'note', x.title || 'Untitled note', x, { folder: x.folderId || null })); trashSave();
+    S.notes = all().filter(x => !noteSelIds.has(x.id)); save('notes'); noteSelIds.clear(); drawList(); paintSelBar(); trashToast(op, `${n} note${n > 1 ? 's' : ''} moved to Recently deleted.`);
   }
   function bulkArchiveNotes() { const n = noteSelIds.size; all().forEach(x => { if (noteSelIds.has(x.id)) x.archived = true; }); save('notes'); noteSelIds.clear(); drawList(); paintSelBar(); toast(`Archived ${n} note${n > 1 ? 's' : ''}.`); }
   function bulkMoveNotes() {
@@ -3926,7 +4202,7 @@ function viewNotes(arg) {
     folderSel.value = sel.folderId || ''; folderSel.addEventListener('change', () => { cur().folderId = folderSel.value || null; save('notes'); });
     const pin = h('button', { class: 'iconbtn' + (sel.pinned ? ' on' : ''), type: 'button', 'aria-pressed': String(!!sel.pinned), 'aria-label': 'Pin note', title: 'Pin to top', onclick: () => { const n = cur(); n.pinned = !n.pinned; save('notes'); rerender(); } }, ic('pin', 18));
     const arch = h('button', { class: 'iconbtn' + (sel.archived ? ' on' : ''), type: 'button', 'aria-label': sel.archived ? 'Unarchive' : 'Archive', title: sel.archived ? 'Unarchive' : 'Archive', onclick: () => { const n = cur(); n.archived = !n.archived; save('notes'); toast(n.archived ? 'Note archived.' : 'Note restored.'); go('notes'); } }, ic('archive', 18));
-    const del = h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Delete note', title: 'Delete', onclick: async () => { if (await confirmBox('Delete this note?', `"${cur().title || 'Untitled'}" will be removed for good.`)) { S.notes = all().filter(n => n.id !== sel.id); save('notes'); go('notes'); } } }, ic('trash', 18));
+    const del = h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Delete note', title: 'Delete', onclick: async () => { if (await confirmBox('Delete this note?', `"${cur().title || 'Untitled'}" moves to Recently deleted for 30 days.`)) { const op = trashOp(), x = cur(); toTrash(op, 'note', x.title || 'Untitled note', x, { folder: x.folderId || null }); trashSave(); S.notes = all().filter(n => n.id !== sel.id); save('notes'); go('notes'); trashToast(op, 'Note moved to Recently deleted.'); } } }, ic('trash', 18));
     setKids(editor, h('div', { class: 'ehead' }, h('a', { class: 'iconbtn backbtn', href: '#/notes', 'aria-label': 'Back to notes' }, ic('left', 20)), sws, folderSel, h('span', { class: 'sp' }), pin, arch, del), toolbar, title, body, h('div', { class: 'efoot' }, meta1, status));
     if (arg && !sel.title && !plainText(sel.body)) requestAnimationFrame(() => title.focus());
   }
@@ -4059,10 +4335,10 @@ function viewFolders(arg) {
   const removeFolder = async f => {
     const ids = new Set([f.id]); let grew = true; while (grew) { grew = false; get('files').folders.forEach(x => { if (x.parent && ids.has(x.parent) && !ids.has(x.id)) { ids.add(x.id); grew = true; } }); }
     const n = get('files').items.filter(i => ids.has(i.folder)).length;
-    if (!await confirmBox(`Delete "${f.name}"?`, ids.size > 1 || n ? `This also deletes ${ids.size > 1 ? (ids.size - 1) + ' folder' + (ids.size > 2 ? 's' : '') + (n ? ' and ' : '') : ''}${n ? n + ' item' + (n > 1 ? 's' : '') : ''} inside it.` : 'This folder is empty.')) return;
-    get('files').items.filter(i => ids.has(i.folder) && i.asset).forEach(i => dropAsset(i.asset));
-    S.files = { folders: get('files').folders.filter(x => !ids.has(x.id)), items: get('files').items.filter(i => !ids.has(i.folder)) }; save('files');
+    if (!await confirmBox(`Delete "${f.name}"?`, (ids.size > 1 || n ? `This also deletes ${ids.size > 1 ? (ids.size - 1) + ' folder' + (ids.size > 2 ? 's' : '') + (n ? ' and ' : '') : ''}${n ? n + ' item' + (n > 1 ? 's' : '') : ''} inside it. ` : '') + 'Everything moves to Recently deleted for 30 days.')) return;
+    const op = trashOp(); trashFolderTree(f.id, op); trashSave(); save('files');
     if (cur && ids.has(cur.id)) go('folders' + (f.parent ? '/' + f.parent : '')); else rerender();
+    trashToast(op, 'Folder moved to Recently deleted.');
   };
   const tile = (main, acts) => h('div', { class: 'tile' }, main, h('div', { class: 'tacts' }, acts));
   let visibleKeys = [];
@@ -4091,15 +4367,16 @@ function viewFolders(arg) {
     });
   }
   async function bulkDelete() {
-    const n = folderSelIds.size; if (!await confirmBox(`Delete ${n} item${n > 1 ? 's' : ''}?`, 'Folders in the selection also delete what is inside them. This cannot be undone.', 'Delete')) return;
+    const n = folderSelIds.size; if (!await confirmBox(`Delete ${n} item${n > 1 ? 's' : ''}?`, 'Folders in the selection also delete what is inside them. Everything moves to Recently deleted for 30 days.', 'Delete')) return;
+    const op = trashOp(); let boards = false;
     folderSelIds.forEach(key => {
       const [kind, id] = key.split(':');
-      if (kind === 'file') { const it = get('files').items.find(x => x.id === id); if (it) { if (it.asset) dropAsset(it.asset); S.files = { folders: get('files').folders, items: get('files').items.filter(x => x.id !== id) }; } }
-      else if (kind === 'note') { S.notes = get('notes').filter(x => x.id !== id); }
-      else if (kind === 'board') { const bd = get('boards'); const b = bd.list.find(x => x.id === id); if (b) { (get('board_' + id).items || []).forEach(it => it.asset && dropAsset(it.asset)); bd.list = bd.list.filter(x => x.id !== id); if (bd.active === id) bd.active = bd.list[0] ? bd.list[0].id : null; removeKey('board_' + id); save('boards'); } }
-      else if (kind === 'folder') { const f = get('files').folders.find(x => x.id === id); if (f) removeFolderSync(id); }
+      if (kind === 'file') { const it = get('files').items.find(x => x.id === id); if (it) { trashItem(it, op); S.files = { folders: get('files').folders, items: get('files').items.filter(x => x.id !== id) }; } }
+      else if (kind === 'note') { const x = get('notes').find(y => y.id === id); if (x) { toTrash(op, 'note', x.title || 'Untitled note', x, { folder: x.folderId || null }); S.notes = get('notes').filter(y => y.id !== id); } }
+      else if (kind === 'board') { if (get('boards').list.some(x => x.id === id)) { trashBoard(id, op); boards = true; } }
+      else if (kind === 'folder') { if (get('files').folders.some(x => x.id === id)) trashFolderTree(id, op); }
     });
-    save('files'); save('notes'); folderSelIds.clear(); drawGrid(); toast(`Deleted ${n} item${n > 1 ? 's' : ''}.`);
+    trashSave(); save('files'); save('notes'); if (boards) save('boards'); folderSelIds.clear(); drawGrid(); trashToast(op, `${n} item${n > 1 ? 's' : ''} moved to Recently deleted.`);
   }
   function removeFolderSync(id) {
     const ids = new Set([id]); let grew = true; while (grew) { grew = false; get('files').folders.forEach(x => { if (x.parent && ids.has(x.parent) && !ids.has(x.id)) { ids.add(x.id); grew = true; } }); }
@@ -4149,7 +4426,7 @@ function viewFolders(arg) {
         let host = ''; if (isLink) { try { host = new URL(i.url).hostname.replace(/^www\./, ''); } catch (e) { } }
         const a = wrapClick(key, h('a', { class: 'ftile big item', href, title: i.name || i.url || '', target: '_blank', rel: 'noopener noreferrer', draggable: 'true', ondragstart: e => dragSetPayload(e, 'file', i.id) }, cb(key), h('span', { class: 'fico thumb' }, isImg ? h('img', { src: href, alt: '', loading: 'lazy' }) : ic(isLink ? 'link' : fileKind(i.type), 34)), h('span', { class: 'fname' }, i.name), h('span', { class: 'fmeta' }, isLink ? host : fileTypeLabel(i.type) + ' · ' + fmtSize(i.size || 0))));
         if (isSb(i.asset)) a.addEventListener('click', e => { if (folderSelMode) return; e.preventDefault(); sbOpen(i.asset, i.name); });
-        return tile(a, [kebabMenu([{ icon: 'edit', label: 'Rename', fn: async () => { const v = await askText({ title: 'Rename', label: 'Name', value: i.name }); if (v) { const c = get('files').items.find(x => x.id === i.id); if (c) { c.name = v; save('files'); rerender(); } } } }, { icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('file', i.id, i.folder) }, ...(isSb(i.asset) ? [{ icon: 'download', label: 'Download', fn: () => sbOpen(i.asset, i.name, true) }] : []), '-', { icon: 'trash', label: 'Delete', danger: true, fn: async () => { if (await confirmBox('Delete this item?', `"${i.name}" will be removed.`)) { if (i.asset) dropAsset(i.asset); S.files = { folders: get('files').folders, items: get('files').items.filter(x => x.id !== i.id) }; save('files'); rerender(); } } }])]);
+        return tile(a, [kebabMenu([{ icon: 'edit', label: 'Rename', fn: async () => { const v = await askText({ title: 'Rename', label: 'Name', value: i.name }); if (v) { const c = get('files').items.find(x => x.id === i.id); if (c) { c.name = v; save('files'); rerender(); } } } }, { icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('file', i.id, i.folder) }, ...(isSb(i.asset) ? [{ icon: 'download', label: 'Download', fn: () => sbOpen(i.asset, i.name, true) }] : []), '-', { icon: 'trash', label: 'Delete', danger: true, fn: async () => { if (await confirmBox('Delete this item?', `"${i.name}" moves to Recently deleted for 30 days.`)) { const op = trashOp(); trashItem(i, op); trashSave(); S.files = { folders: get('files').folders, items: get('files').items.filter(x => x.id !== i.id) }; save('files'); rerender(); trashToast(op, 'Moved to Recently deleted.'); } } }])]);
       }),
       ...noteItems.map(n => { const key = 'note:' + n.id; const a = wrapClick(key, h('a', { class: 'ftile big item', href: '#/notes/' + n.id, title: n.title || 'Untitled', draggable: 'true', ondragstart: e => dragSetPayload(e, 'note', n.id) }, cb(key), h('span', { class: 'fico thumb' }, ic('notes', 30)), h('span', { class: 'fname' }, n.title || 'Untitled note'), h('span', { class: 'fmeta' }, 'Note · ', ago(n.updated)))); return tile(a, [kebabMenu([{ icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('note', n.id, n.folderId) }])]); }),
       ...boardItems.map(bd => { const key = 'board:' + bd.id; const a = wrapClick(key, h('a', { class: 'ftile big item', href: '#/moodboard/' + bd.id, title: bd.name, draggable: 'true', ondragstart: e => dragSetPayload(e, 'board', bd.id) }, cb(key), h('span', { class: 'fico thumb' }, ic('board', 30)), h('span', { class: 'fname' }, bd.name), h('span', { class: 'fmeta' }, 'Moodboard'))); return tile(a, [kebabMenu([{ icon: 'folder', label: 'Move to folder…', fn: () => moveToFolderModal('board', bd.id, bd.folderId) }])]); })
@@ -4528,7 +4805,7 @@ function viewBoard(arg) {
     h('div', { class: 'tgroup zoom' }, h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Zoom out', onclick: () => setZoom(MB.zoom - .1) }, ic('zoomout', 18)), zl, h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Zoom in', onclick: () => setZoom(MB.zoom + .1) }, ic('zoomin', 18))),
     h('div', { class: 'tgroup' },
       h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Rename board', title: 'Rename board', onclick: async () => { const n = await askText({ title: 'Rename board', label: 'Board name', value: cur.name }); if (n) { const c = get('boards').list.find(b => b.id === id); if (c) { c.name = n; save('boards'); rerender(); } } } }, ic('edit', 18)),
-      h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Delete board', title: 'Delete board', onclick: async () => { if (await confirmBox(`Delete "${cur.name}"?`, 'Everything on this board will be removed for good.')) { items().forEach(i => i.asset && dropAsset(i.asset)); const bd = get('boards'); bd.list = bd.list.filter(b => b.id !== id); bd.active = bd.list[0] ? bd.list[0].id : null; removeKey(key); save('boards'); go('moodboard'); } } }, ic('trash', 18))));
+      h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Delete board', title: 'Delete board', onclick: async () => { if (await confirmBox(`Delete "${cur.name}"?`, 'The board and everything on it move to Recently deleted for 30 days.')) { const op = trashOp(); trashBoard(id, op); trashSave(); save('boards'); go('moodboard'); trashToast(op, 'Moodboard moved to Recently deleted.'); } } }, ic('trash', 18))));
   drawStage(); applyZoom(); paintUndoBtns();
   requestAnimationFrame(() => { const bb = bbox(items()); if (bb) { vp.scrollLeft = Math.max(0, (bb.minX - 60) * MB.zoom); vp.scrollTop = Math.max(0, (bb.minY - 60) * MB.zoom); } });
   return h('div', { class: 'page wide mb-page' }, h('div', { class: 'pagehead' }, h('h1', { class: 'ptitle' }, 'Moodboard')), listWrap, tools, ctx, vp,
@@ -4867,6 +5144,80 @@ function changePasswordModal() {
       toast(r.othersFailed ? 'Password changed. CASE! couldn’t sign out your other devices right now; try “Sign out of all devices” later.' : others.checked ? 'Password changed. Your other devices will be signed out.' : 'Password changed.');
     } }] });
   setTimeout(() => cur.focus(), 50);
+}
+
+/* ================= Quick Find (⌘K on Mac, Ctrl+K elsewhere) ================= */
+const IS_MAC = /Mac|iPhone|iPad|iPod/i.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '');
+const QF_KEY = IS_MAC ? '⌘K' : 'Ctrl K';
+let qfOpen = false;
+function isTypingTarget(el) {
+  if (!el || el.nodeType !== 1 || el === document.body) return false;
+  return !!(el.isContentEditable || el.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+}
+function qfBlocked() {
+  return !meta.booted || !Auth.isSignedIn() || PUBLIC_PAGES.has(route.page) || !!$('.modal')
+    || (meta.mode === 'cloud' && !meta.synced && !have.profile)
+    || (AUTH_CONFIG.mode === 'supabase' && Shared.status && Shared.status.maintenance && Access.role !== 'admin');
+}
+document.addEventListener('keydown', e => {
+  if (String(e.key).toLowerCase() !== 'k' || e.altKey || e.shiftKey) return;
+  if (IS_MAC ? !(e.metaKey && !e.ctrlKey) : !(e.ctrlKey && !e.metaKey)) return;
+  if (isTypingTarget(e.target) || qfBlocked()) return;
+  e.preventDefault(); openQuickFind();
+});
+const qfPlain = html => String(html || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+function qfResults(q) {
+  const t = q.trim().toLowerCase(); if (!t) return [];
+  const rank = (title, body) => { const a = String(title || '').toLowerCase(); return a.startsWith(t) ? 3 : a.includes(t) ? 2 : body && String(body).toLowerCase().includes(t) ? 1 : 0; };
+  const out = [], add = (group, list) => { const top = list.filter(x => x.s > 0).sort((a, b) => b.s - a.s || (b.when || 0) - (a.when || 0)).slice(0, 5); if (top.length) out.push([group, top]); };
+  add('Tasks', get('todos').map(x => ({ s: rank(x.text, x.notes), icon: 'todo', title: x.text, when: x.created,
+    meta: (x.done ? 'Done' : 'Task') + (x.due ? ' · due ' + shortDate(x.due) : ''), run: () => { go('todo'); setTimeout(() => { if (get('todos').some(y => y.id === x.id)) taskEditor(x.id); }, 80); } })));
+  add('Notes', get('notes').map(x => ({ s: rank(x.title, qfPlain(x.body)), icon: 'notes', title: x.title || 'Untitled note', when: x.updated,
+    meta: 'Note' + (x.archived ? ' · Archived' : '') + (x.pinned ? ' · Pinned' : ''), run: () => go('notes/' + x.id) })));
+  add('Events', get('events').map(x => ({ s: rank(x.title, x.notes), icon: 'cal', title: x.title || 'Untitled event', when: parseYmd(x.date).getTime(),
+    meta: 'Event · ' + shortDate(x.date) + (x.time ? ', ' + x.time : ''), run: () => go('calendar/' + x.date) })));
+  add('Folders', get('files').folders.map(x => ({ s: rank(x.name, x.description), icon: 'folder', title: x.name, when: x.updated,
+    meta: 'Folder' + (x.archived ? ' · Archived' : ''), run: () => go('folders/' + x.id) })));
+  add('Files & links', get('files').items.map(x => { const link = x.kind === 'link'; let host = ''; if (link) { try { host = new URL(x.url).host; } catch (e) { } }
+    return { s: rank(x.name, link ? x.url : ''), icon: link ? 'link' : 'file', title: x.name, when: x.created,
+      meta: link ? 'Link' + (host ? ' · ' + host : '') : fileTypeLabel(x.type) + ' · ' + fmtSize(x.size || 0),
+      run: () => { if (link && /^https?:\/\//i.test(x.url || '')) window.open(x.url, '_blank', 'noopener');
+        else if (!link && isSb(x.asset)) sbOpen(x.asset, x.name); else go('folders' + (x.folder ? '/' + x.folder : '')); } }; }));
+  add('Moodboards', get('boards').list.map(x => ({ s: rank(x.name), icon: 'board', title: x.name, meta: 'Moodboard', run: () => go('moodboard/' + x.id) })));
+  return out;
+}
+function openQuickFind() {
+  if (qfOpen || qfBlocked()) return;
+  qfOpen = true;
+  const input = h('input', { class: 'field', type: 'search', placeholder: 'Search tasks, notes, events, folders, files…', 'aria-label': 'Search CASE!', autocomplete: 'off', role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'qf-list', 'aria-autocomplete': 'list' });
+  const list = h('div', { class: 'qf-list', id: 'qf-list', role: 'listbox', 'aria-label': 'Results' });
+  let opts = [], act = 0, m = null;
+  const choose = o => { if (m) m.close(); qfOpen = false; o.run(); };
+  const setAct = i => { if (!opts.length) return; act = (i + opts.length) % opts.length; opts.forEach((o, j) => o.el.setAttribute('aria-selected', String(j === act)));
+    input.setAttribute('aria-activedescendant', opts[act].el.id); opts[act].el.scrollIntoView({ block: 'nearest' }); };
+  const opt = (icon, title, meta, run) => { const o = { run }; o.el = h('button', { class: 'qf-opt', type: 'button', role: 'option', id: 'qf-' + opts.length, 'aria-selected': 'false', tabindex: '-1',
+      onclick: () => choose(o), onmousemove: () => { const j = opts.indexOf(o); if (j !== act) setAct(j); } }, ic(icon, 18), h('span', {}, h('span', { class: 'qf-t' }, title), meta ? h('small', {}, meta) : null)); opts.push(o); return o.el; };
+  const draw = () => {
+    const q = input.value.trim(); opts = []; act = 0; const kids = [];
+    qfResults(q).forEach(([g, items]) => { kids.push(h('div', { class: 'qf-group', role: 'presentation' }, g)); items.forEach(x => kids.push(opt(x.icon, x.title, x.meta, x.run))); });
+    if (q) {
+      kids.push(h('div', { class: 'qf-group', role: 'presentation' }, 'Create'));
+      kids.push(opt('plus', `New task: “${q}”`, 'Adds it to your to-do list', () => { addTodo(q); toast('Task added.'); if (route.page === 'todo' || route.page === 'home') render(); }));
+      kids.push(opt('notes', `New note: “${q}”`, 'Opens it in Notes', () => { const n = { id: uid(), title: q.slice(0, 120), body: '', color: NOTE_COLORS[get('notes').length % NOTE_COLORS.length], pinned: false, archived: false, folderId: null, created: Date.now(), updated: Date.now() }; get('notes').push(n); save('notes'); go('notes/' + n.id); }));
+      kids.push(opt('cal', `New event: “${q}”`, 'Today, on your calendar', () => { eventModal(null, ymd(new Date())); setTimeout(() => { const i = $('.modal input.field'); if (i) { i.value = q.slice(0, 80); i.dispatchEvent(new Event('input')); } }, 30); }));
+    }
+    if (!q) kids.push(h('p', { class: 'qf-empty' }, `Type to search everything in CASE!. Open this anywhere with ${QF_KEY}.`));
+    else if (!qfResults(q).length) kids.unshift(h('p', { class: 'qf-empty' }, 'No matches.'));
+    setKids(list, kids); if (opts.length) setAct(0); else input.removeAttribute('aria-activedescendant');
+  };
+  input.addEventListener('input', draw);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setAct(act + 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setAct(act - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (opts[act]) choose(opts[act]); }
+  });
+  m = openModal({ title: 'Quick Find', content: h('div', { class: 'qf' }, input, list), actions: [{ label: 'Close', value: null }], onClose: () => { qfOpen = false; } });
+  draw(); setTimeout(() => input.focus(), 30);
 }
 
 /* ================= public views ================= */
@@ -5359,6 +5710,7 @@ async function finishBoot() {
   $('#boot').classList.add('gone'); setTimeout(() => $('#boot').remove(), 500);
   render(); tmInit(); paintTimer();
   refreshNotifs(); paintNotifBadge();
+  if (meta.mode !== 'cloud' && Auth.isSignedIn()) trashAutoPurge();
   if (get('settings').music.autoplay) { if (PUBLIC_PAGES.has(route.page)) meta.autoplayPending = true; else Ambience.play(get('settings').music.preset); }
   setInterval(() => { if (ymd(new Date()) !== (get('profile').focusLog || {}).date) paintTimer(); }, 60000);
   setInterval(refreshNotifs, 5 * 60000);
