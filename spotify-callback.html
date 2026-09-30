@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>CASE! · Spotify</title>
+</head>
+<body>
+<p style="font:15px system-ui,sans-serif;text-align:center;margin-top:20vh">Finishing the Spotify connection…</p>
+<script>
+/* Spotify sends you back here after you approve (or cancel) the connection.
+   This page only hands the result to CASE! in this same tab, then returns to CASE!.
+   It contains no keys or secrets; CASE! checks the one-time "state" value before using the code. */
+(function () {
+  var q = new URLSearchParams(location.search);
+  try {
+    sessionStorage.setItem('case:sp:cb', JSON.stringify({ code: q.get('code'), state: q.get('state'), error: q.get('error'), at: Date.now() }));
+  } catch (e) { }
+  location.replace('/#/');
+})();
+</script>
+</body>
+</html>
